@@ -611,6 +611,10 @@ impl CleanBlocks {
         }
     }
 
+    fn contains(&self, block: usize) -> bool {
+        self.0.range(..=block).next_back().is_some_and(|(_, &to)| block < to)
+    }
+
     fn uncovered(&self, from: usize, to: usize) -> Vec<(usize, usize)> {
         let mut next = self.0.range(..=from).next_back().map_or(from, |(_, &end)| from.max(end));
         let mut missing = Vec::new();
@@ -919,7 +923,7 @@ fn guard_unclean(g: &mut Guards, first: usize, last: usize) -> Vec<usize> {
     unpark_committed(g);
     if !covered(&g.views, first, last) {
         let fresh: Vec<usize> = (first..last)
-            .filter(|b| !g.clean.contains(b) && !covered(&g.views, *b, *b + 1))
+            .filter(|&b| !g.clean.contains(b) && !covered(&g.views, b, b + 1))
             .collect();
         g.unclean.extend(fresh);
         add_range(&mut g.views, first, last);
@@ -954,7 +958,7 @@ fn guard_unclean(g: &mut Guards, first: usize, last: usize) -> Vec<usize> {
         if g.protected.contains(&block) {
             // Written through the runtime, or guarded with another view of
             // its page: still read-only.
-            g.clean.insert(block);
+            g.clean.insert(block, block + 1);
             g.unclean.remove(&block);
             if view_guard() {
                 protect_aliases(g, block);
@@ -1182,7 +1186,8 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
         g.aliased.remove(&block);
         for alias in crate::inplace::pages_of(block * BLOCK) {
             let alias = alias / BLOCK;
-            if alias != block && g.protected.contains(&alias) && g.clean.remove(&alias) {
+            if alias != block && g.protected.contains(&alias) && g.clean.contains(alias) {
+                g.clean.remove(alias);
                 if covered(&g.views, alias, alias + 1) {
                     g.unclean.insert(alias);
                 }
