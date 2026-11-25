@@ -358,7 +358,6 @@ const PAGE: usize = 64 << 10;
 
 struct Section {
     handle: HANDLE,
-<<<<<<< HEAD
     /// The section's whole range, mapped the first time one of its pages is
     /// written and kept until the section goes; `None` once the host has
     /// refused that mapping. See [`Section::persistent_ptr`].
