@@ -50,6 +50,10 @@ mod host;
 #[cfg(windows)]
 mod over;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
+mod pixels;
+#[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
 mod inplace;

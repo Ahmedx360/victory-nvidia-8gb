@@ -8437,6 +8437,7 @@ impl Meter {
                 tracing::info!("dropped {:.1}/frame without a host pipeline: {why}", *n as f64 / frames);
             }
         }
+        crate::overlay::set_frame(fps, ms, draws);
         if self.caption.is_none() {
             // The window's own text, read without a message.
             let mut buffer = vec![0u16; 512];
@@ -8446,7 +8447,7 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let text = format!(" | soldsawn 8GB \u{b7} {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
@@ -8700,6 +8701,7 @@ impl Host {
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
             self.log_video_memory("right after the swap chain is made");
+            crate::overlay::start(hwnd, self.adapter.clone());
             Ok(Presenter {
                 swap_chain,
                 width,
