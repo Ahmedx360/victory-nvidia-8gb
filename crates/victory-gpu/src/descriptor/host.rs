@@ -2811,7 +2811,7 @@ fn buffer_uav(
     let whole = crate::shadow::find(address, len)?;
     // The title range the view reads ([`buffer_range`]: `None` where it finds
     // none): what `buffer_copy` reports the copy of a made slot with.
-    let range = {
+    let (element_opt, range) = {
         // SAFETY: a buffer view's union member.
         let b = unsafe { desc.Anonymous.Buffer };
         let element = if b.StructureByteStride > 0 {
@@ -2821,8 +2821,9 @@ fn buffer_uav(
         } else {
             crate::resource::element(desc.Format.0 as u32).map(|(bytes, _)| bytes)
         };
-        element.map(|element| (address + b.FirstElement * element, u64::from(b.NumElements) * element))
+        (element, element.map(|element| (address + b.FirstElement * element, u64::from(b.NumElements) * element)))
     };
+    let element = element_opt.unwrap_or(0);
     // Off the elements of that copy: on a copy of its own bytes, from its
     // element 0 (`own_bytes`).
     let own = buffer_view
@@ -2830,13 +2831,6 @@ fn buffer_uav(
         .and_then(|()| {
             // SAFETY: a buffer view's union member.
             let b = unsafe { desc.Anonymous.Buffer };
-            let element = if b.StructureByteStride > 0 {
-                u64::from(b.StructureByteStride)
-            } else if b.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0 {
-                4
-            } else {
-                crate::resource::element(desc.Format.0 as u32).map_or(0, |(bytes, _)| bytes)
-            };
             let unknown = desc.Format == DXGI_FORMAT_UNKNOWN;
             own_bytes(whole.offset(address), address, b.FirstElement, b.NumElements, element, b.StructureByteStride, unknown)
                 .and_then(|(start, bytes)| crate::shadow::exact(start, bytes).map(|own| (own, start, bytes)))
@@ -3849,7 +3843,7 @@ mod tests {
         let Some(heap) = HostHeap::new(false, 8) else {
             return; // no host GPU
         };
-        assert!(heap.note_buffer(1, Some(&view), false).is_empty());
+        assert!(heap.note_buffer(1, Some(&view), false, true).is_empty());
         let (slot, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(slot, 1);
         heap.texture_slot_done(slot, write, None);
@@ -3942,7 +3936,7 @@ mod tests {
         let handle = title.as_ptr() as u64;
         crate::descriptor::record(handle, view(0x7fec_0000_0000));
         let (first, key) = crate::descriptor::view_and_key(handle).unwrap();
-        assert!(heap.note_buffer(1, Some(&first), false).is_empty());
+        assert!(heap.note_buffer(1, Some(&first), false, true).is_empty());
         let (index, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
         assert_eq!(index, 1);
         // Its upload was recorded: out of the queue, the slot not made yet.
@@ -4164,7 +4158,7 @@ mod own_copy_tests {
             words[10] = address as u32;
             words[11] = (address >> 32) as u32;
             let view = View::Placed(unordered, resource, words);
-            let buffer = make(&view, heap.cpu(u32::from(unordered))).flatten().unwrap();
+            let buffer = make(&view, heap.cpu(u32::from(unordered))).and_then(|(b, _)| b).unwrap();
             let (shadow, start, bytes) = buffer_copy(&view).unwrap();
             assert_eq!(buffer, shadow.buffer);
             assert_eq!((start, bytes), (address + 64, 128));
