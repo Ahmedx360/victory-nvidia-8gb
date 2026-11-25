@@ -164,7 +164,8 @@ static CARD_BYTES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 /// Whether the texture queue leaves room on the card for the card copies
 /// of title buffers that are not made yet
-/// (`VICTORY_CARD_ROOM_FOR_BUFFERS=1`; off by default).
+/// (on by default, `VICTORY_CARD_ROOM_FOR_BUFFERS=0` turns it off; see
+/// below).
 ///
 /// The copies are made in one burst when the world loads (run 189: 94 of
 /// its 95 within two seconds, right before the first world frame), and
@@ -1747,6 +1748,18 @@ pub(crate) fn merged_stats() -> [u64; 3] {
     [0, 1, 2].map(|i| MERGED[i].swap(0, Ordering::Relaxed))
 }
 
+/// Since the last frame-rate line: why [`Shadow::merge_under_writes`] could
+/// not put the title's bytes in and the flights were settled: the copy is
+/// not write-watched; neither the write watch nor the guards could say what
+/// the title wrote; more changed runs than allowed (`VICTORY_MERGE_RUNS`);
+/// no snapshot to compare with.
+static MERGE_WHY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// [`MERGE_WHY`], taken.
+pub(crate) fn merge_why_stats() -> [u64; 4] {
+    [0, 1, 2, 3].map(|i| MERGE_WHY[i].swap(0, Ordering::Relaxed))
+}
+
 /// `runs` (in order) with those a gap of `gap` bytes or fewer apart made
 /// one run, the gap's bytes included.
 fn joined_over(runs: Vec<(usize, usize)>, gap: usize) -> Vec<(usize, usize)> {
@@ -2892,6 +2905,7 @@ impl Shadow {
             return false;
         }
         if self.watched.load(Ordering::Relaxed) == NOT_WATCHED {
+            MERGE_WHY[0].fetch_add(1, Ordering::Relaxed);
             return true;
         }
         let base = start / PAGE;
@@ -2904,6 +2918,7 @@ impl Shadow {
             // those were all of run 99's cases: the flights were settled
             // 4-5 times a frame for "0 pages looked at".
             let Some((now, written)) = crate::watch::writes(a, e, true) else {
+                MERGE_WHY[1].fetch_add(1, Ordering::Relaxed);
                 return true;
             };
             let stale: Vec<usize> = {
@@ -2939,6 +2954,7 @@ impl Shadow {
                     let held = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                     let runs = joined_over(changed_runs(title, held), merge_gap());
                     if runs.len() > *runs_left {
+                        MERGE_WHY[2].fetch_add(1, Ordering::Relaxed);
                         return true;
                     }
                     *runs_left -= runs.len();
@@ -2950,6 +2966,7 @@ impl Shadow {
                     }
                 } else {
                     let Some(snapshot) = before.as_mut() else {
+                        MERGE_WHY[3].fetch_add(1, Ordering::Relaxed);
                         return true;
                     };
                     // SAFETY: the snapshot's allocation holds the copy's
