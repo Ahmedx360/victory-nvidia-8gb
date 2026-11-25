@@ -817,6 +817,51 @@ void main() {
         (0..n).map(|i| unsafe { data.cast::<u32>().add(at + i).read_volatile() }).collect()
     }
 
+    #[test]
+    fn device_removal_does_not_complete_a_copy_job() {
+        const CHILD: &str = "VICTORY_TEST_REMOVE_COPY_DEVICE";
+        if std::env::var_os(CHILD).is_none() {
+            // D3D12 devices on the same adapter can be shared within a
+            // process. Remove the test device in its own process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "queue2::tests::device_removal_does_not_complete_a_copy_job", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            eprint!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "the isolated copy lane test failed");
+            return;
+        }
+
+        let Some(warp) = Warp::new(1) else {
+            eprintln!("no WARP device; skipped");
+            return;
+        };
+        let Ok(device) = warp.device.cast::<ID3D12Device5>() else {
+            eprintln!("no ID3D12Device5 on WARP; skipped");
+            return;
+        };
+        // SAFETY: our isolated WARP device and an unsignalled test fence.
+        let gate: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.unwrap();
+        let lane = &warp.second.down;
+        let list = lane.list().unwrap();
+        let job = lane.send(list, &[(&gate, 1)], 0).unwrap();
+        assert!(!lane.done(job));
+        // SAFETY: only the test child uses this WARP device.
+        unsafe { device.RemoveDevice() };
+        let removed = unsafe { device.GetDeviceRemovedReason() }.unwrap_err();
+        assert_eq!(unsafe { lane.fence.GetCompletedValue() }, u64::MAX);
+        let done = lane.done(job);
+        let waited = lane.wait(job, warp.event);
+        // SAFETY: the test owns the event and has finished waiting.
+        unsafe { windows::Win32::Foundation::CloseHandle(warp.event) }.unwrap();
+
+        assert!(!done, "a removed copy fence must not report completion");
+        assert_eq!(waited.unwrap_err().code(), removed.code());
+        eprintln!("WARP reported device removal for the pending copy job");
+    }
+
     /// What shaders wrote, read back through the down lane, is what the
     /// direct queue reads back: the same bytes of a buffer in the card's
     /// memory come down both ways, and the lane's copy is behind the fence
