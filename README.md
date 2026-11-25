@@ -7,7 +7,7 @@ A fork of [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (its
 ## Measured Result (RTX 4060 Laptop 8 GB)
 
 - **Hardware:** Windows 11, NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM, Wave32), 48 GB RAM, Series X profile.
-- **Performance & Visuals:** ~6 FPS (`172.7 ms/frame` at 5,181 draws in the first room) with full walls, doors, floor, and natural indirect lighting after one warm-up launch.
+- **Performance & Visuals:** ~6 FPS (`172.7 ms/frame` at 5,181 draws, `175.2 ms/frame` at 6,271 draws; `~7.2 / 8.0 GB VRAM`, `38% GPU`) with full walls, doors, floor, and natural indirect lighting after one warm-up launch.
 - **Key 8 GB VRAM Finding:** Setting `VICTORY_TEXTURE_DROP_MIPS=2` (without `VICTORY_LEVELS_ON_DEMAND=1`) prevents 8 GB VRAM exhaustion so both diffuse textures and indirect lighting probes upload cleanly on the first launch.
 
 ## Quick Build & Run
@@ -33,6 +33,11 @@ Built on `fxceless/victory-fork@0b0074e` with the following community PRs (integ
 - `fxceless/victory-fork#864` (Lane-order indirect window record clamping)
 - `fxceless/victory-fork#860` (Stop false trips of the `fill_ahead` latch)
 - `fxceless/victory-fork#936` (Flush `SNAPS` before dropping `Shadow`)
+- `fxceless/victory-fork#432` (Release unmapped placed texture host copies promptly for 8 GB VRAM headroom)
+- `fxceless/victory-fork#932` (Find free dynamic descriptor runs across the search cursor)
+- `fxceless/victory-fork#922` (Disable blending on integer render targets so host pipelines build)
+- `fxceless/victory-fork#896` (Keep texture refresh notifications through streaming bursts)
+- `fxceless/victory-fork#964` (Propagate device removal cleanly from copy queue fences)
 
 ---
 
