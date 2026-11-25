@@ -4038,12 +4038,12 @@ fn lookup(
         let map = buffers_shared();
         let found = map.range(..=(address, usize::MAX)).rev().take(64).find(|(_, e)| e.end >= end);
         match found {
-            Some((_, Entry { shadow: Some(shadow), .. })) => return Some(shadow.clone()),
+            Some((_, Entry { shadow: Some(shadow), .. })) => return Some((shadow.clone(), false)),
             // To be made: below, alone.
             Some(_) => {}
             None => {
                 drop(map);
-                return loose(address, end, len <= 1, any);
+                return loose(address, end, len <= 1, any, range);
             }
         }
     }
