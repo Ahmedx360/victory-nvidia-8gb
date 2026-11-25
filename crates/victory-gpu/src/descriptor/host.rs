@@ -26,6 +26,8 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// Lock-free mirror of [`Self::made`] for [`Self::mirror`] fast-path hits.
+    made_fast: Box<[std::sync::atomic::AtomicU64]>,
     /// A fingerprint of the record each slot held when the pass over
     /// records copied in as bytes last looked at it
     /// ([`HostHeap::mirror_copied`]; 0: never looked at). Made on first use.
@@ -1007,6 +1009,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            made_fast: (0..count).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
             copied: Mutex::new(Vec::new()),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             next: Mutex::new((0, vec![false; DYNAMIC as usize])),
@@ -1472,6 +1475,7 @@ impl HostHeap {
         if key == 0 {
             return;
         }
+        self.made_fast[index as usize].store(0, std::sync::atomic::Ordering::Release);
         match view_at(key as u32, (key >> 32) as u32) {
             Some(view) => null_for(&view, self.cpu(index)),
             None => null_view(self.cpu(index)),
@@ -1986,6 +1990,13 @@ impl HostHeap {
         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
+        if tag == VIEW_TAG
+            && key != 0
+            && self.made_fast[index as usize].load(std::sync::atomic::Ordering::Acquire) == key
+            && let Some(view) = view_at(i, generation)
+        {
+            return Some(view);
+        }
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
         let Some(view) = view else {
@@ -1993,6 +2004,7 @@ impl HostHeap {
             // title released): nothing to read.
             if made[index as usize] != 0 {
                 made[index as usize] = 0;
+                self.made_fast[index as usize].store(0, std::sync::atomic::Ordering::Release);
                 self.make_null(index);
                 let _ = self.note_buffer(index, None, false);
             } else if for_draw {
@@ -2034,7 +2046,8 @@ impl HostHeap {
                 KEPT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some(view);
             }
-            made[index as usize] = if later { 0 } else { key };
+            let new_key = if later { 0 } else { key };
+            made[index as usize] = new_key;
             let kept = if later {
                 None
             } else {
@@ -2044,6 +2057,7 @@ impl HostHeap {
                 null_for(&view, self.cpu(index));
             }
             self.keep(index, kept.flatten());
+            self.made_fast[index as usize].store(new_key, std::sync::atomic::Ordering::Release);
         }
         Some(view)
     }
