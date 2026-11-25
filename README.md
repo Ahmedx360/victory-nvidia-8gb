@@ -7,8 +7,9 @@ A fork of [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (its
 ## Measured Result (RTX 4060 Laptop 8 GB)
 
 - **Hardware:** Windows 11, NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM, Wave32), 48 GB RAM, Series X profile.
-- **Performance & Visuals:** `153–172 ms/frame` (`6 FPS`, shortest frames `107 ms`) at `4,600–6,836 draws/frame`, `96% GPU` at `2595 MHz`, `~7.4–7.6 / 8.0 GB VRAM`, `0` slow-core scheduling, with full walls, doors, floor, and natural indirect lighting and zero visual artifacts.
-- **Key 8 GB VRAM Finding:** Setting `VICTORY_TEXTURE_DROP_MIPS=2` (without `VICTORY_LEVELS_ON_DEMAND=1`) prevents 8 GB VRAM exhaustion so both diffuse textures and indirect lighting probes upload cleanly on the first launch.
+- **Performance & Visuals (Series X + `VICTORY_RESOLUTION=1920x1080` + `VICTORY_TEXTURE_DROP_MIPS=2`):** **`8.7 FPS` (`~115 ms/frame`)**, **`51% GPU`** (`2595 MHz`, `35.5 W`, `62 °C`), **`5.3 / 8.0 GB VRAM`** (~2.9 GB headroom — enough to test `DROP_MIPS=1` for sharper textures!), with full walls, doors, floor, and natural indirect lighting and zero visual artifacts.
+- **Performance & Visuals (Series X native 4K ladder + `VICTORY_TEXTURE_DROP_MIPS=2`):** `153–172 ms/frame` (`6 FPS`, shortest `107 ms`) at `4,600–6,836 draws/frame`, `96% GPU` at `2595 MHz`, `~7.4–7.6 / 8.0 GB VRAM`, `0` slow-core scheduling.
+- **Key 8 GB VRAM Finding:** Setting `VICTORY_TEXTURE_DROP_MIPS=2` (without `VICTORY_LEVELS_ON_DEMAND=1`) prevents 8 GB VRAM exhaustion so both diffuse textures and indirect lighting probes upload cleanly on the first launch. Adding `VICTORY_RESOLUTION=1920x1080` keeps full Series X lighting while dropping GPU load from `96%` to `51%` and freeing ~2.3 GB VRAM.
 
 ## Quick Build & Run
 
@@ -17,11 +18,13 @@ cargo build --release --bin victory
 .\scripts\play-nvidia-8gb.ps1 -Exe "path\to\title.exe"
 ```
 
-*(Note: The first launch warms the shader cache for the paired Wave64 lowering; subsequent launches reuse the cached shaders.)*
+*(Note: The first launch warms the shader cache for the paired Wave64 lowering; subsequent launches reuse the cached shaders. Pass `-Borderless` or set `VICTORY_BORDERLESS=1` / `VICTORY_WINDOW_PERCENT=88` if your driver shows a black window under independent flip.)*
 
 ## Credits & Integrated PRs
 
-Built on `fxceless/victory-fork@465b94f` (including `3973179` + `465b94f`) with the following community PRs and fork optimizations (integration and testing were AI-assisted):
+Built on `fxceless/victory-fork@ca8829f` (including `3973179`, `465b94f`, `ca8829f`) with the following community PRs and fork optimizations (integration and testing were AI-assisted):
+
+- `soldsawn/victory-nvidia-8gb#1` (by `@DKTTT`: `VICTORY_RESOLUTION=1920x1080` resolution ladder cap & opt-in `VICTORY_BORDERLESS=1` / `VICTORY_WINDOW_PERCENT` borderless window)
 
 - `Marvisak/VIctory#1009` (`xmem::low_guards` for >32 GB RAM Windows 11 systems)
 - `fxceless/victory-fork#610` (`VICTORY_TEXTURE_DROP_MIPS=N` for 8 GB cards)

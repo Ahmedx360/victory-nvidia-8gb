@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Exe,
-    [int]$DropMips = 2
+    [int]$DropMips = 2,
+    [string]$Resolution = "1920x1080",
+    [switch]$Borderless
 )
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -15,6 +17,17 @@ if (-not (Test-Path $victory)) {
 Remove-Item Env:VICTORY_SKIP_PIPELINES, Env:VICTORY_BAKE_TEXTURES_MS, Env:VICTORY_CARD_FETCH_INFLIGHT -ErrorAction SilentlyContinue
 Remove-Item Env:VICTORY_LEVELS_ON_DEMAND, Env:VICTORY_REFRESH_ONCE, Env:VICTORY_AMBIENT -ErrorAction SilentlyContinue
 Remove-Item Env:VICTORY_VIEW_KNOWN, Env:VICTORY_FRAME_LOG, Env:VICTORY_CARD_METER, Env:VICTORY_PROFILE -ErrorAction SilentlyContinue
+
+if ($Resolution) {
+    $env:VICTORY_RESOLUTION = $Resolution
+} else {
+    Remove-Item Env:VICTORY_RESOLUTION -ErrorAction SilentlyContinue
+}
+if ($Borderless) {
+    $env:VICTORY_BORDERLESS = "1"
+} else {
+    Remove-Item Env:VICTORY_BORDERLESS -ErrorAction SilentlyContinue
+}
 
 $env:VICTORY_ASYNC_SUBMIT = "1"
 $env:VICTORY_QUEUE2 = "1"
