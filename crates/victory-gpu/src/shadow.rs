@@ -33,6 +33,9 @@ thread_local! {
     /// between refreshes.
     static COMPARED_ROOM: std::cell::Cell<(Vec<u8>, Vec<(usize, usize)>)> =
         const { std::cell::Cell::new((Vec::new(), Vec::new())) };
+    /// Whether this is one of the threads kept for [`wide`]: such a thread
+    /// does not hand work to the others and wait for it.
+    static WIDE_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A title buffer's host copy.
@@ -1377,6 +1380,7 @@ fn workers() -> &'static Workers {
         let n = std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6);
         for i in 0..n {
             let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
+                WIDE_WORKER.set(true);
                 let workers = WORKERS.get().expect("made above");
                 loop {
                     let job = {
@@ -1439,6 +1443,42 @@ fn wide(jobs: Vec<Job>) {
 /// refreshes, the merge of what shaders wrote to card copies).
 pub(crate) fn wide_run(jobs: Vec<Box<dyn FnOnce() + Send>>) {
     wide(jobs);
+}
+
+/// As [`wide`], for a caller that holds a lock of a copy
+/// ([`Shadow::copy_stale`]): it runs the last of `jobs` itself and waits
+/// for the others without taking work off the queue, since what other
+/// callers put there may want the lock it holds.
+fn wide_apart(mut jobs: Vec<Job>) {
+    let Some(own) = jobs.pop() else {
+        return;
+    };
+    if jobs.is_empty() {
+        own();
+        return;
+    }
+    let workers = workers();
+    let left = Arc::new((Mutex::new(jobs.len()), std::sync::Condvar::new()));
+    {
+        let mut queue = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        for job in jobs {
+            let left = left.clone();
+            queue.push_back(Box::new(move || {
+                job();
+                let mut n = left.0.lock().unwrap_or_else(|e| e.into_inner());
+                *n -= 1;
+                if *n == 0 {
+                    left.1.notify_all();
+                }
+            }));
+        }
+    }
+    workers.more.notify_all();
+    own();
+    let mut n = left.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *n > 0 {
+        n = left.1.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
 }
 
 /// About this many bytes to a piece of work for [`wide`].
@@ -1915,9 +1955,98 @@ pub(crate) fn compared_stats() -> [u64; 3] {
     [0, 1, 2].map(|i| COMPARED[i].swap(0, Ordering::Relaxed))
 }
 
+/// With [`refresh_compare`]: whether a refresh with [`WIDE_COMPARE`] bytes
+/// or more to compare spreads them over the threads kept for the snapshots
+/// (`VICTORY_WIDE_COMPARE=1`; off by default). The compare is bound by one
+/// core's memory speed, as the snapshots were ([`wide_back`]).
+fn wide_compare() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_COMPARE").is_some_and(|v| v == "1"))
+}
+
+/// The bytes of written pages one refresh has to compare from which
+/// [`wide_compare`] spreads them, and about how many go to a piece of work.
+const WIDE_COMPARE: usize = 1 << 20;
+const WIDE_COMPARE_JOB: usize = 256 << 10;
+
+/// `runs` (each `[from, to)`) as pieces of work of about
+/// [`WIDE_COMPARE_JOB`] bytes each: long runs cut at 64 KiB page
+/// boundaries, short ones together.
+fn compare_jobs(runs: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+    let mut jobs = Vec::new();
+    let mut group: Vec<(usize, usize)> = Vec::new();
+    let mut grouped = 0;
+    for &(from, to) in runs {
+        let mut at = from;
+        while at < to {
+            // To the page boundary that fills the piece, one page on at least.
+            let stop = ((at + WIDE_COMPARE_JOB - grouped) / PAGE * PAGE).max((at / PAGE + 1) * PAGE).min(to);
+            group.push((at, stop));
+            grouped += stop - at;
+            at = stop;
+            if grouped >= WIDE_COMPARE_JOB {
+                jobs.push(std::mem::take(&mut group));
+                grouped = 0;
+            }
+        }
+    }
+    if !group.is_empty() {
+        jobs.push(group);
+    }
+    jobs
+}
+
+/// What [`take_changed`] did with the stretches it was given: the runs
+/// taken into the copy and the stretches that could not be read, both as
+/// (address, bytes) in the order met, and the bytes compared.
+#[derive(Default)]
+struct Taken {
+    runs: Vec<(usize, usize)>,
+    unread: Vec<(usize, usize)>,
+    compared: usize,
+}
+
+/// Reads title memory `[at, to)` a 64 KiB page at a time, compares it with
+/// the copy's bytes for it at `held`, and puts the 4 KiB steps that differ
+/// ([`CHUNK`]) into the copy; what it did is added to `out`.
+///
+/// # Safety
+/// `held` is valid for `to - at` bytes that nothing else reads or writes
+/// meanwhile.
+unsafe fn take_changed(at: usize, to: usize, held: *mut u8, out: &mut Taken) {
+    let (mut title, mut steps) = COMPARED_ROOM.take();
+    title.resize(PAGE, 0);
+    let first = at;
+    let mut at = at;
+    while at < to {
+        let n = (PAGE - at % PAGE).min(to - at);
+        let page = &mut title[..n];
+        if crate::host::read_into(at as *const u8, page) {
+            // SAFETY: the caller's.
+            let held = unsafe { std::slice::from_raw_parts_mut(held.add(at - first), n) };
+            changed_chunks(page, held, CHUNK, &mut steps);
+            for &(r, m) in &steps {
+                held[r..r + m].copy_from_slice(&page[r..r + m]);
+                match out.runs.last_mut() {
+                    Some(last) if last.0 + last.1 == at + r => last.1 += m,
+                    _ => out.runs.push((at + r, m)),
+                }
+            }
+            out.compared += n;
+        } else {
+            out.unread.push((at, n));
+        }
+        at += n;
+    }
+    COMPARED_ROOM.set((title, steps));
+}
+
 #[cfg(test)]
 mod merge_tests {
-    use super::{PIECE, back_piece, changed_chunks, changed_runs};
+    use super::{
+        CHUNK, PAGE, PIECE, Taken, WIDE_COMPARE_JOB, back_piece, changed_chunks, changed_runs, compare_jobs,
+        take_changed,
+    };
 
     /// A piece put back takes the GPU's bytes where the copy changed and
     /// the title's everywhere else, reads and writes title memory only from
@@ -2057,6 +2186,67 @@ mod merge_tests {
             }
             assert_eq!(put, now, "{changes:?}");
         }
+    }
+
+    /// The pieces of work hold every byte of the runs once and in order,
+    /// cut a run only at 64 KiB page boundaries, and all but the last hold
+    /// a piece's worth of bytes and less than a page more.
+    #[test]
+    fn compare_jobs_cut_the_runs_at_page_boundaries() {
+        let runs = [
+            (3 * PAGE + 100, 3 * PAGE + 100 + 700_000),
+            (40 * PAGE, 40 * PAGE + 10),
+            (50 * PAGE, 58 * PAGE),
+            (90 * PAGE + 5, 90 * PAGE + 9),
+        ];
+        let jobs = compare_jobs(&runs);
+        let mut joined: Vec<(usize, usize)> = Vec::new();
+        for &(a, b) in jobs.iter().flatten() {
+            assert!(a < b);
+            match joined.last_mut() {
+                Some(last) if last.1 == a => {
+                    assert_eq!(a % PAGE, 0, "a run is cut at a page boundary");
+                    last.1 = b;
+                }
+                _ => joined.push((a, b)),
+            }
+        }
+        assert_eq!(joined, runs);
+        let sizes: Vec<usize> = jobs.iter().map(|job| job.iter().map(|&(a, b)| b - a).sum()).collect();
+        assert!(sizes.len() > 2, "{sizes:?}");
+        for &size in &sizes[..sizes.len() - 1] {
+            assert!((WIDE_COMPARE_JOB..WIDE_COMPARE_JOB + PAGE).contains(&size), "{sizes:?}");
+        }
+    }
+
+    /// The copy ends as the memory read, nothing is left unread, and what
+    /// was taken is the few 4 KiB steps around the bytes that differed:
+    /// runs in order, apart from one another, inside the range.
+    #[test]
+    fn take_changed_takes_the_steps_that_differ() {
+        let len = 3 * PAGE + 1000;
+        let title: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+        let mut held = title.clone();
+        // One byte alone, two next to each other, the last one.
+        for at in [5000, PAGE - 1, PAGE, len - 1] {
+            held[at] ^= 0x41;
+        }
+        let from = title.as_ptr() as usize;
+        let mut out = Taken::default();
+        // SAFETY: `held` is this test's own, `len` bytes.
+        unsafe { take_changed(from, from + len, held.as_mut_ptr(), &mut out) };
+        assert_eq!(held, title);
+        assert!(out.unread.is_empty());
+        assert_eq!(out.compared, len);
+        assert!((1..=3).contains(&out.runs.len()), "{:?}", out.runs);
+        let mut end = from;
+        for (i, &(at, n)) in out.runs.iter().enumerate() {
+            assert!(n > 0 && at + n <= from + len);
+            assert!(if i == 0 { at >= end } else { at > end }, "{:?}", out.runs);
+            end = at + n;
+        }
+        let taken: usize = out.runs.iter().map(|&(_, n)| n).sum();
+        assert!(taken <= 4 * CHUNK, "{taken}");
     }
 }
 
@@ -3247,7 +3437,16 @@ impl Shadow {
         let mut writes = written.iter().peekable();
         // The run of stale pages gathered: its first page, and whether the
         // copy never took its pages (those are taken whole, not compared).
-        let (mut bytes, mut run): (usize, Option<(usize, bool)>) = (0, None);
+        let mut run: Option<(usize, bool)> = None;
+        // The runs to compare, each `[from, to)`, and the bytes taken whole.
+        let (mut compared, mut bytes): (Vec<(usize, usize)>, usize) = (Vec::new(), 0);
+        let mut take = |from: usize, to: usize, fresh: bool| {
+            if compare && !fresh {
+                compared.push((from, to));
+            } else {
+                bytes += self.copy(from, to);
+            }
+        };
         let last = (to - 1) / PAGE;
         for page in from / PAGE..=last {
             let write = match writes.peek() {
@@ -3269,70 +3468,85 @@ impl Shadow {
                 match run {
                     Some((_, was)) if was == fresh => {}
                     Some((first, was)) => {
-                        bytes += self.copy_run((first * PAGE).max(from), (page * PAGE).min(to), compare && !was);
+                        take((first * PAGE).max(from), (page * PAGE).min(to), was);
                         run = Some((page, fresh));
                     }
                     None => run = Some((page, fresh)),
                 }
             } else if let Some((first, fresh)) = run.take() {
-                bytes += self.copy_run((first * PAGE).max(from), (page * PAGE).min(to), compare && !fresh);
+                take((first * PAGE).max(from), (page * PAGE).min(to), fresh);
             }
         }
         // Cut to the range: next to it shaders may be writing the copy.
         if let Some((first, fresh)) = run {
-            bytes += self.copy_run((first * PAGE).max(from), ((last + 1) * PAGE).min(to), compare && !fresh);
+            take((first * PAGE).max(from), ((last + 1) * PAGE).min(to), fresh);
+        }
+        if !compared.is_empty() {
+            bytes += self.copy_changed(&compared);
         }
         bytes
-    }
-
-    /// Takes title memory `[from, to)`: what differs from the copy
-    /// (`compared`: [`Shadow::copy_changed`]), or all of it.
-    fn copy_run(&self, from: usize, to: usize, compared: bool) -> usize {
-        if compared { self.copy_changed(from, to) } else { self.copy(from, to) }
     }
 
     /// [`Shadow::copy`] of pages the copy took before, with
-    /// [`refresh_compare`]: title memory `[from, to)`, cut to the buffer,
-    /// is read and compared with the copy, and only the 4 KiB steps that
-    /// differ go into the copy and, for a copy in the card's memory, up to
-    /// the card. Returns the bytes taken.
-    fn copy_changed(&self, from: usize, to: usize) -> usize {
+    /// [`refresh_compare`]: title memory in `runs` (each `[from, to)`, cut
+    /// to the buffer) is read and compared with the copy, and only the 4 KiB
+    /// steps that differ go into the copy and, for a copy in the card's
+    /// memory, up to the card ([`take_changed`]); on several threads with
+    /// [`wide_compare`]. Returns the bytes taken.
+    fn copy_changed(&self, runs: &[(usize, usize)]) -> usize {
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
-        let (from, to) = (from.max(start), to.min(end));
-        let (mut title, mut runs) = COMPARED_ROOM.take();
-        title.resize(PAGE, 0);
-        let (mut bytes, mut at) = (0, from);
-        while at < to {
-            let n = (PAGE - at % PAGE).min(to - at);
-            let page = &mut title[..n];
-            if !crate::host::read_into(at as *const u8, page) {
+        let runs: Vec<(usize, usize)> =
+            runs.iter().map(|&(a, b)| (a.max(start), b.min(end))).filter(|&(a, b)| a < b).collect();
+        let total: usize = runs.iter().map(|&(a, b)| b - a).sum();
+        let found: Vec<Taken> = if wide_compare() && total >= WIDE_COMPARE && !WIDE_WORKER.get() {
+            let data = self.data as usize;
+            let results: Arc<Mutex<Vec<Taken>>> = Arc::default();
+            let jobs: Vec<Job> = compare_jobs(&runs)
+                .into_iter()
+                .map(|stretches| {
+                    let results = results.clone();
+                    Box::new(move || {
+                        let mut out = Taken::default();
+                        for (a, b) in stretches {
+                            // SAFETY: inside the mapping, a stretch no other
+                            // piece of work has, outside the ranges shaders
+                            // are writing (`update`); the caller holds the
+                            // copy's pages and waits for this.
+                            unsafe { take_changed(a, b, (data + (a - start)) as *mut u8, &mut out) };
+                        }
+                        results.lock().unwrap_or_else(|e| e.into_inner()).push(out);
+                    }) as Job
+                })
+                .collect();
+            wide_apart(jobs);
+            std::mem::take(&mut *results.lock().unwrap_or_else(|e| e.into_inner()))
+        } else {
+            let mut out = Taken::default();
+            for &(a, b) in &runs {
+                // SAFETY: inside the mapping (cut to the buffer above) and
+                // outside the ranges shaders are writing (`update`), where
+                // only the refreshing thread writes the copy.
+                unsafe { take_changed(a, b, self.data.add(a - start), &mut out) };
+            }
+            vec![out]
+        };
+        let (mut bytes, mut taken) = (0, 0);
+        for out in &found {
+            for &(at, n) in &out.runs {
+                // After the bytes are in, as `copy` tells of them.
+                self.changed(at - start, at - start + n);
+                self.card_changed(at - start, at - start + n);
+                taken += n;
+            }
+            for &(at, n) in &out.unread {
                 // Not all of it is mapped: as `copy` takes it.
                 bytes += self.copy(at, at + n);
-                at += n;
-                continue;
             }
-            let offset = at - start;
-            // SAFETY: inside the mapping (`from` and `to` are within the
-            // buffer) and outside the ranges shaders are writing
-            // (`update`), where only the refreshing thread writes the copy.
-            let held = unsafe { std::slice::from_raw_parts_mut(self.data.add(offset), n) };
-            changed_chunks(page, held, CHUNK, &mut runs);
-            let mut taken = 0;
-            for &(r, m) in &runs {
-                held[r..r + m].copy_from_slice(&page[r..r + m]);
-                // After the bytes are in, as `copy` tells of them.
-                self.changed(offset + r, offset + r + m);
-                self.card_changed(offset + r, offset + r + m);
-                taken += m;
-            }
-            COMPARED[0].fetch_add(n as u64, Ordering::Relaxed);
-            COMPARED[1].fetch_add(taken as u64, Ordering::Relaxed);
-            COMPARED[2].fetch_add(runs.len() as u64, Ordering::Relaxed);
-            bytes += taken;
-            at += n;
+            COMPARED[0].fetch_add(out.compared as u64, Ordering::Relaxed);
+            COMPARED[2].fetch_add(out.runs.len() as u64, Ordering::Relaxed);
         }
-        COMPARED_ROOM.set((title, runs));
-        bytes
+        COMPARED[1].fetch_add(taken as u64, Ordering::Relaxed);
+        bytes + taken
     }
 
     /// Copies title memory `[from, to)`, cut to the buffer, into the copy.
