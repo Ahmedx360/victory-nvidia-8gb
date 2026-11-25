@@ -1,3 +1,55 @@
+# VIctory — NVIDIA 8 GB (Wave32) Fork
+
+A fork of [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (itself a fork of [VIctory](https://github.com/Marvisak/VIctory)), tuned for **8 GB NVIDIA GeForce (32-lane Wave32) GPUs on Windows 11**.
+
+**This repository contains no game files, code, assets, saves, caches, or binaries.** You need your own copy of the title. Licensed **GPL-3.0-or-later**.
+
+## Measured Result (RTX 4060 Laptop 8 GB)
+
+- **Hardware:** Windows 11, NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM, Wave32), 48 GB RAM, Series X profile.
+- **Performance & Visuals:** `153–172 ms/frame` (`6 FPS`, shortest frames `107 ms`) at `4,600–6,836 draws/frame`, `96% GPU` at `2595 MHz`, `~7.4–7.6 / 8.0 GB VRAM`, `0` slow-core scheduling, with full walls, doors, floor, and natural indirect lighting and zero visual artifacts.
+- **Key 8 GB VRAM Finding:** Setting `VICTORY_TEXTURE_DROP_MIPS=2` (without `VICTORY_LEVELS_ON_DEMAND=1`) prevents 8 GB VRAM exhaustion so both diffuse textures and indirect lighting probes upload cleanly on the first launch.
+
+## Quick Build & Run
+
+```powershell
+cargo build --release --bin victory
+.\scripts\play-nvidia-8gb.ps1 -Exe "path\to\title.exe"
+```
+
+*(Note: The first launch warms the shader cache for the paired Wave64 lowering; subsequent launches reuse the cached shaders.)*
+
+## Credits & Integrated PRs
+
+Built on `fxceless/victory-fork@465b94f` (including `3973179` + `465b94f`) with the following community PRs and fork optimizations (integration and testing were AI-assisted):
+
+- `Marvisak/VIctory#1009` (`xmem::low_guards` for >32 GB RAM Windows 11 systems)
+- `fxceless/victory-fork#610` (`VICTORY_TEXTURE_DROP_MIPS=N` for 8 GB cards)
+- `fxceless/victory-fork#799` (NVIDIA Wave32 CBV 64 KiB clamp and host fixes)
+- `fxceless/victory-fork#854` (Paired Wave64 compute lowering on 32-lane GPUs & >32 KiB mesh shaders)
+- `fxceless/victory-fork#868` (`VICTORY_SKIP_WC_COMPARE=1` write-combining copy-back reduction)
+- `fxceless/victory-fork#812`, `#979`, `#987` (64-bit bitset view guards, `RwLock` shadow maps, dirty card-copy queue, `VICTORY_INDIRECT_WINDOW_DRAWS=1`, `VICTORY_GUARD_HOLES_FRAME=1`)
+- `fxceless/victory-fork#768` (`VICTORY_WIDE_TEXTURES=1` parallel submission texture checks)
+- `fxceless/victory-fork#864` (Lane-order indirect window record clamping)
+- `fxceless/victory-fork#860` (Stop false trips of the `fill_ahead` latch)
+- `fxceless/victory-fork#936` (Flush `SNAPS` before dropping `Shadow`)
+- `fxceless/victory-fork#432` (Release unmapped placed texture host copies promptly for 8 GB VRAM headroom)
+- `fxceless/victory-fork#932` (Find free dynamic descriptor runs across the search cursor)
+- `fxceless/victory-fork#922` (Disable blending on integer render targets so host pipelines build)
+- `fxceless/victory-fork#896` (Keep texture refresh notifications through streaming bursts)
+- `fxceless/victory-fork#964` (Propagate device removal cleanly from copy queue fences)
+- `fxceless/victory-fork#853` (Sync aliased view invalidations)
+- `fxceless/victory-fork#231` (`VICTORY_XMEM_PERSISTENT_VIEW=1`)
+- `fxceless/victory-fork#71` (64-thread `CARD_COMPARE`)
+- `fxceless/victory-fork#798`, `#188` (`--console series-s` and second present plane)
+- `fxceless/victory-fork#144` (Bind 256-byte-aligned table CBVs directly from shadow buffers)
+- `fxceless/victory-fork#949` (Skip whole 4 MiB shadow windows for exact buffer views)
+- `fxceless/victory-fork#1007` (`VICTORY_HEAP_WORKER=1` background heap-indexed texture upload worker)
+- `fxceless/victory-fork#1015` (`VICTORY_ALIAS_ONCE=1` prelude alias copies once per source write)
+- **Fork optimizations:** Lock-free `HostHeap::made_fast` (`AtomicU64`) descriptor mirror fast path, P-core pinning for title recording threads, `VICTORY_CLAMP_WAITS=0`, and `desc.mip_levels < 5` preservation for sharp 2D splash screens.
+
+---
+
 # VIctory fork (work in progress)
 
 A work-in-progress fork of [VIctory](https://github.com/Marvisak/VIctory), a
