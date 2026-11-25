@@ -529,7 +529,7 @@ pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
 /// physical-page views, and how many of those show a page that has more
 /// than one address. Logging only.
 pub(crate) fn view_census(at: usize, len: usize) -> (usize, usize) {
-    let v = views();
+    let v = VIEWS.read().unwrap_or_else(|e| e.into_inner());
     let end = at.saturating_add(len);
     let (mut in_views, mut multi) = (0, 0);
     for (&base, &(vlen, section, offset)) in v.views.range(..end) {
