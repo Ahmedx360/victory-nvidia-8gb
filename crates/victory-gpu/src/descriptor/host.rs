@@ -2699,8 +2699,6 @@ fn buffer_srv(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     buffer_view: bool,
 ) -> Option<(Kept, Option<BufferCopy>)> {
-    let whole = crate::shadow::find(address, len)?;
-    let offset = whole.offset(address);
     // The title range the view reads ([`buffer_range`]): what `buffer_copy`
     // reports the copy of a made slot with.
     // SAFETY: a buffer view's union member.
@@ -2711,21 +2709,20 @@ fn buffer_srv(
     };
     // Off the elements of that copy: on a copy of its own bytes, from its
     // element 0 (`own_bytes`).
-    let own = buffer_view
-        .then_some(())
-        .and_then(|()| {
-            // SAFETY: a buffer view's union member.
-            let b = unsafe { desc.Anonymous.Buffer };
-            let unknown = desc.Format == DXGI_FORMAT_UNKNOWN;
-            own_bytes(offset, address, b.FirstElement, b.NumElements, element_size(&desc), b.StructureByteStride, unknown)
-                .and_then(|(start, bytes)| crate::shadow::exact(start, bytes).map(|own| (own, start, bytes)))
-        });
-    let (shadow, offset, own_copy) = match own {
-        Some((own, start, bytes)) => {
-            desc.Anonymous.Buffer.FirstElement = 0;
-            (own, 0, Some((start, bytes)))
+    let (shadow, own) = crate::shadow::find_or_exact(address, len, |offset| {
+        if !buffer_view {
+            return None;
         }
-        None => (whole, offset, None),
+        // SAFETY: a buffer view's union member.
+        let b = unsafe { desc.Anonymous.Buffer };
+        let unknown = desc.Format == DXGI_FORMAT_UNKNOWN;
+        own_bytes(offset, address, b.FirstElement, b.NumElements, element_size(&desc), b.StructureByteStride, unknown)
+    })?;
+    let (offset, own_copy) = if own {
+        desc.Anonymous.Buffer.FirstElement = 0;
+        (0, Some(shadow.span()))
+    } else {
+        (shadow.offset(address), None)
     };
     // A structured view as a raw view of the same bytes (see `raw_window`).
     // SAFETY: a buffer view's union member.
@@ -2808,7 +2805,6 @@ fn buffer_uav(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
     buffer_view: bool,
 ) -> Option<(Kept, Option<BufferCopy>)> {
-    let whole = crate::shadow::find(address, len)?;
     // The title range the view reads ([`buffer_range`]: `None` where it finds
     // none): what `buffer_copy` reports the copy of a made slot with.
     let (element_opt, range) = {
@@ -2826,23 +2822,21 @@ fn buffer_uav(
     let element = element_opt.unwrap_or(0);
     // Off the elements of that copy: on a copy of its own bytes, from its
     // element 0 (`own_bytes`).
-    let own = buffer_view
-        .then_some(())
-        .and_then(|()| {
-            // SAFETY: a buffer view's union member.
-            let b = unsafe { desc.Anonymous.Buffer };
-            let unknown = desc.Format == DXGI_FORMAT_UNKNOWN;
-            own_bytes(whole.offset(address), address, b.FirstElement, b.NumElements, element, b.StructureByteStride, unknown)
-                .and_then(|(start, bytes)| crate::shadow::exact(start, bytes).map(|own| (own, start, bytes)))
-        });
-    let (shadow, own_copy) = match own {
-        Some((own, start, bytes)) => {
-            desc.Anonymous.Buffer.FirstElement = 0;
-            (own, Some((start, bytes)))
+    let (shadow, own) = crate::shadow::find_or_exact(address, len, |offset| {
+        if !buffer_view {
+            return None;
         }
-        None => (whole, None),
+        // SAFETY: a buffer view's union member.
+        let b = unsafe { desc.Anonymous.Buffer };
+        let unknown = desc.Format == DXGI_FORMAT_UNKNOWN;
+        own_bytes(offset, address, b.FirstElement, b.NumElements, element, b.StructureByteStride, unknown)
+    })?;
+    let own_copy = if own {
+        desc.Anonymous.Buffer.FirstElement = 0;
+        Some(shadow.span())
+    } else {
+        None
     };
-    let own = own_copy.is_some();
     // SAFETY: a live buffer.
     let flags = unsafe { shadow.buffer.GetDesc() }.Flags;
     if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
