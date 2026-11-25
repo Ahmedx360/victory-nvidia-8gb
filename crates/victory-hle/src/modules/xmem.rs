@@ -30,7 +30,7 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::core::BOOL;
 
-use crate::{HleModule, hle_export};
+use crate::{HleExport, HleModule, hle_export};
 
 const MIB: usize = 1 << 20;
 
@@ -160,6 +160,9 @@ pub extern "system" fn XMemVirtualAlloc(
     if at.is_null() && constrained && highest < FOUR_GIB {
         at = low_guards::retry(size, || allocate(&mut parameter));
     }
+    if !at.is_null() && kind & MEM_COMMIT != 0 {
+        victory_gpu::title_pages_changed(at as usize, size);
+    }
     if base.is_null() {
         // The census keeps what the title asked for (`VICTORY_CENSUS`).
         #[cfg(windows)]
@@ -171,11 +174,6 @@ pub extern "system" fn XMemVirtualAlloc(
             at = format_args!("{at:p}"),
             "XMemVirtualAlloc"
         );
-    }
-    // Committed: what the GPU side found uncommitted there is no longer so
-    // (it looks again only now and then otherwise).
-    if !at.is_null() && kind & MEM_COMMIT != 0 {
-        victory_gpu::title_memory_committed(at as usize, size);
     }
     at
 }
@@ -313,6 +311,7 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
     if block.is_null() {
         return block.cast();
     }
+    victory_gpu::title_pages_changed(block as usize, layout.size());
     // SAFETY: the block holds the alignment (at least the header) and then
     // `size` bytes.
     unsafe {
@@ -1392,6 +1391,36 @@ pub(crate) fn module() -> HleModule {
             hle_export!(XMemGetWorkingSetStatistics),
             hle_export!(XMemTransferMemory),
         ],
+    }
+}
+
+/// The title's `VirtualAlloc`: the host's, and the GPU side is told of the
+/// commit (`victory_gpu::title_pages_changed`).
+extern "system" fn title_virtual_alloc(
+    base: *const c_void,
+    size: usize,
+    kind: u32,
+    protect: u32,
+) -> *mut c_void {
+    // SAFETY: the title's own arguments, passed through.
+    let at = unsafe { VirtualAlloc(base, size, kind, protect) };
+    if !at.is_null() && kind & MEM_COMMIT != 0 {
+        victory_gpu::title_pages_changed(at as usize, size);
+    }
+    at
+}
+
+/// The host memory call we stand in front of, only while the GPU side
+/// wants to be told of commits (`victory_gpu::title_pages_told`): the
+/// title imports it from `api-ms-win-core-memory-l1-1-0.dll`.
+pub(crate) fn host_memory_module() -> HleModule {
+    HleModule {
+        name: "host memory",
+        dlls: &["kernel32.dll", "kernelbase.dll", "api-ms-win-core-memory-*"],
+        exports: vec![HleExport {
+            name: "VirtualAlloc",
+            address: title_virtual_alloc as *const () as usize,
+        }],
     }
 }
 
