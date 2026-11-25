@@ -2484,22 +2484,26 @@ pub(crate) fn buffer_copy(view: &View) -> Option<BufferCopy> {
     // The whole buffer the view is of, and the copy made on it: asked once
     // for both questions below.
     let extent = buffer_extent(view);
-    let whole = extent.and_then(|(base, width)| crate::shadow::find(base, width));
-    if let (Some((base, _)), Some(whole_ref)) = (extent, whole.as_ref())
-        && let Some((first, count, element, stride, unknown)) = buffer_fields(view)
-        && let Some((start, bytes)) = own_bytes(whole_ref.offset(base), base, first, count, element, stride, unknown)
-        && let Some(own) = crate::shadow::exact(start, bytes)
-    {
-        return Some((own, start, bytes));
-    }
-    if view_extent()
-        && let Some((base, width)) = extent
-        // (The console is lax: a view may begin past its buffer's end.)
-        && address >= base
-        && address - base < width.max(1)
-        && let Some(shadow) = whole
-    {
-        return Some((shadow, address, len));
+    if let Some((base, width)) = extent {
+        let backing = buffer_fields(view).and_then(|(first, count, element, stride, unknown)| {
+            crate::shadow::find_or_exact(base, width, |offset| {
+                own_bytes(offset, base, first, count, element, stride, unknown)
+            })
+        });
+        if let Some((shadow, true)) = backing {
+            let (start, bytes) = shadow.span();
+            return Some((shadow, start, bytes));
+        }
+        if view_extent()
+            // (The console is lax: a view may begin past its buffer's end.)
+            && address >= base
+            && address - base < width.max(1)
+            && let Some(shadow) = backing
+                .map(|(shadow, _)| shadow)
+                .or_else(|| crate::shadow::find(base, width))
+        {
+            return Some((shadow, address, len));
+        }
     }
     crate::shadow::find(address, len).map(|shadow| (shadow, address, len))
 }
