@@ -6932,7 +6932,7 @@ impl HostList {
 /// The write-watch journal and the guards are behind their own locks, as
 /// they are for the title's threads.
 ///
-/// On by default since an RTX 4070 / i7-14700KF run: "copies" went from
+/// On by default since an RTX 4070 12 GB / Ryzen 5 7500F run: "copies" went from
 /// 54-56 to 45-47 ms a frame and the frame from 144-154 to 131-139 ms.
 fn wide_refresh() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
