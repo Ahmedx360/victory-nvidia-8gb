@@ -907,6 +907,9 @@ fn guard_unclean(g: &mut Guards, first: usize, last: usize) -> Vec<usize> {
             // its page: still read-only.
             g.clean.insert(block);
             g.unclean.remove(&block);
+            if view_guard() {
+                protect_aliases(g, block);
+            }
             flush(g, &mut run);
             continue;
         }
@@ -1131,6 +1134,9 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
         for alias in crate::inplace::pages_of(block * BLOCK) {
             let alias = alias / BLOCK;
             if alias != block && g.protected.contains(&alias) && g.clean.remove(&alias) {
+                if covered(&g.views, alias, alias + 1) {
+                    g.unclean.insert(alias);
+                }
                 #[cfg(feature = "diagnostics")]
                 ALIASES[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
