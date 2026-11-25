@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn a_section_notes_the_pages_committed_through_it() {
         // 130 pages: three words of bits, the last one partly used
-        let section = Arc::new(Section::new(std::ptr::null_mut(), 130));
+        let section = Arc::new(Section::new(std::ptr::null_mut(), 130 * PAGE, 130));
         let at = |index| Slice { section: section.clone(), index };
         assert!(!at(0).committed(1));
         at(62).note_committed(4); // 62..66, across the first word's end
@@ -1521,7 +1521,7 @@ mod tests {
         assert!(at(127).committed(3));
         assert!(!at(127).committed(4), "past the end is never committed");
         // a new section of the same pages starts clear
-        let fresh = Slice { section: Arc::new(Section::new(std::ptr::null_mut(), 130)), index: 62 };
+        let fresh = Slice { section: Arc::new(Section::new(std::ptr::null_mut(), 130 * PAGE, 130)), index: 62 };
         assert!(!fresh.committed(1));
     }
     use super::*;
