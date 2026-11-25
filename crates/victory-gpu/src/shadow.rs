@@ -3655,7 +3655,7 @@ impl Shadow {
             take((first * PAGE).max(from), ((last + 1) * PAGE).min(to), fresh);
         }
         if !compared.is_empty() {
-            bytes += self.copy_changed(&compared);
+            bytes += self.copy_changed_runs(&compared);
         }
         bytes
     }
@@ -3666,7 +3666,7 @@ impl Shadow {
     /// steps that differ go into the copy and, for a copy in the card's
     /// memory, up to the card ([`take_changed`]); on several threads with
     /// [`wide_compare`]. Returns the bytes taken.
-    fn copy_changed(&self, runs: &[(usize, usize)]) -> usize {
+    fn copy_changed_runs(&self, runs: &[(usize, usize)]) -> usize {
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let runs: Vec<(usize, usize)> =
             runs.iter().map(|&(a, b)| (a.max(start), b.min(end))).filter(|&(a, b)| a < b).collect();
