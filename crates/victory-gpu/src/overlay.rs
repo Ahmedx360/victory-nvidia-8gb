@@ -420,7 +420,7 @@ pub(crate) fn render(stats: &Stats, frame_h: usize) -> Option<Bitmap> {
     let hardware = [
         short_cpu(&stats.cpu_name),
         short_gpu(&stats.gpu_name),
-        format!("{:.0} GB RAM  \u{b7}  soldsawn 8GB", stats.ram.2.round()),
+        format!("{:.0} GB RAM  \u{b7}  soldsawn 8GB (overlay: Neptune)", stats.ram.2.round()),
     ];
     let fps_text = format!("{:.0}", stats.fps);
     let ms_text = format!("{:.1} ms", stats.ms);
