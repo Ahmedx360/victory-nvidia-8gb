@@ -1888,9 +1888,11 @@ void main() {
         for i in 0..RECORDS as usize {
             let rec = &out_words[i * 6..(i + 1) * 6];
             if rec[0] == (1 << 22) && rec[1] == 16 {
-                // Which two is the order of the atomics (the second group's can
-                // win on WARP): never the one that is no draw.
-                assert!(i != 0, "the record that is no draw must run empty (record {i})");
+                // WHICH two draws keep the budget is the order the card
+                // runs the threads in, which nothing fixes (the software
+                // device gave another two in five runs of seven): only how
+                // many is the clamp's to say, below.
+                assert_ne!(i, 0, "the record that is no draw charges nothing and is not kept as one");
                 kept += 1;
             } else {
                 assert_eq!((rec[0], rec[1]), (0, 0), "excess draw must be zeroed");
