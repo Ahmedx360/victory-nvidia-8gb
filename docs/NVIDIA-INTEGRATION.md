@@ -31,7 +31,7 @@ borderless workaround, Agility SDK 620 exports, and the optional
 
 | Feature or original switch | Integration status |
 | --- | --- |
-| F10 performance overlay | Restored from the Neptune-derived NVIDIA overlay. `VICTORY_OVERLAY=0` and `-NoOverlay` disable it. |
+| F10 performance overlay | Restored from the Neptune-derived NVIDIA overlay. It starts hidden in pareto launches and visible in the legacy NVIDIA launcher. `VICTORY_OVERLAY=0` and `-NoOverlay` disable it. |
 | `VICTORY_TEXTURE_MAX_DIM` | Restored as an opt-in cap on title-memory uploads for eligible tiled 2D textures. It requires `VICTORY_LEVELS_ON_DEMAND=1` and tiled resource support. GPU writes can still make levels resident. |
 | `VICTORY_RAM_TRIM_MB` | Restored as an opt-in free-physical-memory threshold. It releases spare scratch and snapshots, trims reset lists, and lowers idle RAM retention. |
 | `VICTORY_CLAMP_WAITS=0` | Restored for experiments on the single-clamp fallback. Leaving the waits enabled is the default. Validate indirect arguments and output on hardware before using it in a preset. |

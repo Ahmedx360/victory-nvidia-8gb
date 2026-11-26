@@ -27,7 +27,7 @@ static FPS_X100: AtomicU64 = AtomicU64::new(0);
 static MS_X100: AtomicU64 = AtomicU64::new(0);
 /// The presenter can be rebuilt with a new window while the overlay thread lives.
 static GAME_WINDOW: AtomicUsize = AtomicUsize::new(0);
-static VISIBLE: AtomicBool = AtomicBool::new(true);
+static VISIBLE: AtomicBool = AtomicBool::new(false);
 
 const VK_F10: i32 = 0x79;
 const REFRESH: usize = 1;
@@ -99,6 +99,7 @@ pub(crate) fn start(hwnd: windows::Win32::Foundation::HWND, adapter: Option<IDXG
     }
     GAME_WINDOW.store(hwnd.0 as usize, Ordering::Relaxed);
     ONCE.call_once(|| {
+        VISIBLE.store(std::env::var_os("VICTORY_OVERLAY").is_some(), Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name("victory-overlay".into())
             .spawn(move || run(adapter));

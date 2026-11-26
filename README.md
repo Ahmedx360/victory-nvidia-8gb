@@ -24,7 +24,8 @@ $env:VICTORY_RUNNER = (Resolve-Path .\target\release\victory.exe).Path
 The fork's existing `scripts\play-nvidia-8gb.ps1 -Exe <path>` command launches
 the new renderer with Series X at 1080p by default. The `-DropMips` argument
 is accepted for older scripts and emits a warning when given a nonzero value.
-Press F10 to toggle the performance overlay. Use `-NoOverlay` or
+Press F10 to toggle the performance overlay. It starts hidden in pareto
+launches unless `VICTORY_OVERLAY=1` is set. Use `-NoOverlay` or
 `VICTORY_OVERLAY=0` for benchmarks without it. The diagnostics build's
 separate panel is still available on F3.
 

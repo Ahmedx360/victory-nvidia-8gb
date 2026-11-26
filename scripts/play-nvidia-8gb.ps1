@@ -30,6 +30,8 @@ if ($Water) { $settings.VICTORY_TEXTURE_BACK = '1' }
 if ($NoOverlay) {
     $settings.VICTORY_OVERLAY = '0'
     $settings.VICTORY_PANEL = '0'
+} elseif (-not (Test-Path Env:VICTORY_OVERLAY)) {
+    $settings.VICTORY_OVERLAY = '1'
 }
 
 $saved = @{}
