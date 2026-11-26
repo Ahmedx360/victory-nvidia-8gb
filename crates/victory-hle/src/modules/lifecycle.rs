@@ -233,8 +233,7 @@ fn requested_frame() -> Option<(i32, i32)> {
         let text = std::env::var("VICTORY_WINDOW_SIZE")
             .or_else(|_| std::env::var("VICTORY_RESOLUTION"))
             .ok()?;
-        let (w, h) = text.split_once('x')?;
-        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        parse_window_limit(&text)
     })
 }
 
@@ -261,8 +260,8 @@ fn hook(hwnd: HWND) {
                 .and_then(|v| v.trim().parse::<u32>().ok())
                 .filter(|v| *v > 0 && *v <= 100)
                 .unwrap_or(100);
-            let w = frame_w * percent as i32 / 100;
-            let h = frame_h * percent as i32 / 100;
+            let w = (i64::from(frame_w) * i64::from(percent) / 100).max(1) as i32;
+            let h = (i64::from(frame_h) * i64::from(percent) / 100).max(1) as i32;
             let x = (frame_w - w) / 2;
             let y = (frame_h - h) / 2;
             let style = wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32;
