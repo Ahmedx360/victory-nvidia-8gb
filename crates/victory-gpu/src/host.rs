@@ -1072,6 +1072,89 @@ mod tests {
         assert_eq!(super::rebrand_caption(""), "");
     }
 
+    #[test]
+    fn pooled_target_first_use_prelude_records_activation_and_initialization() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+
+        let Some(host) = super::host() else { return };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: 64,
+            Height: 64,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        };
+        let state = D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_RENDER_TARGET.0);
+        // SAFETY: a valid single-sample 2D render-target description.
+        let Some(texture) = (unsafe { crate::pool::target(&host.device, &desc, state, None) }) else {
+            return;
+        };
+        let copy = std::sync::Arc::new(crate::resource::HostTexture::new(texture, state.0 as u32));
+        let list = host.new_list().expect("a host list can be created");
+        list.states.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            std::sync::Arc::as_ptr(&copy) as usize,
+            (state.0 as u32, state.0 as u32, copy),
+        );
+        assert!(list.prelude().is_some());
+        assert!(list.prelude().is_none());
+    }
+
+    #[test]
+    fn pooled_depth_target_first_use_activates_in_depth_write_state() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_D32_FLOAT, DXGI_SAMPLE_DESC};
+
+        let Some(host) = super::host() else { return };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: 64,
+            Height: 64,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_D32_FLOAT,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+        };
+        let state = D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_DEPTH_WRITE.0);
+        // SAFETY: a valid single-sample 2D depth-stencil description.
+        let Some(texture) = (unsafe { crate::pool::target(&host.device, &desc, state, None) }) else {
+            return;
+        };
+        let copy = std::sync::Arc::new(crate::resource::HostTexture::new(texture, state.0 as u32));
+        let list = host.new_list().expect("a host list can be created");
+        list.states.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            std::sync::Arc::as_ptr(&copy) as usize,
+            (state.0 as u32, state.0 as u32, copy),
+        );
+        assert!(list.prelude().is_some());
+        assert!(list.prelude().is_none());
+    }
+
+    #[test]
+    fn memory_benchmark_csv_distinguishes_process_and_adapter_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.csv");
+        // SAFETY: this test is the only caller in its test process and runs
+        // before the benchmark path's OnceLock has been initialized.
+        unsafe { std::env::set_var("VICTORY_MEMORY_BENCH_CSV", &path) };
+        super::memory_benchmark_line(20.0, 50.0);
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].split(',').count(), 16);
+        assert_eq!(lines[1].split(',').count(), 16);
+        assert_eq!(lines[1].split(',').nth(3), Some("20.000"));
+        assert_eq!(lines[1].split(',').nth(4), Some("50.000"));
+    }
+
     /// A list of ours is found by its name, with the debug layer's note or not.
     #[cfg(feature = "diagnostics")]
     #[test]
@@ -1264,6 +1347,15 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// Put DRED-visible labels directly on the prelude command list. These are
+/// intentionally emitted only by diagnostics builds.
+#[cfg(feature = "diagnostics")]
+fn prelude_breadcrumb(list: &ID3D12GraphicsCommandList, label: &str) {
+    let text: Vec<u16> = label.encode_utf16().chain([0]).collect();
+    // SAFETY: the list is open and copies the marker text during the call.
+    unsafe { list.SetMarker(0, Some(text.as_ptr().cast()), (text.len() * 2) as u32) };
+}
 
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
@@ -2719,6 +2811,8 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+// Keep the hot submission payload inline; each element is one flight.
+#[allow(clippy::large_enum_variant)]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -2945,7 +3039,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -3744,6 +3838,7 @@ fn late_line(frames: f64) {
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
@@ -6723,6 +6818,10 @@ impl HostList {
         // starts with (back to its real state if the list does not use it).
         let mut to_copy = Vec::new();
         let mut barriers = Vec::new();
+        let mut alias_barriers = Vec::new();
+        let mut alias_to_target = Vec::new();
+        let mut alias_discards = Vec::new();
+        let mut alias_from_target = Vec::new();
         let mut copying = std::collections::HashMap::new();
         for (depth, twin, colour) in &syncs {
             let (from, to) = if *colour {
@@ -6750,13 +6849,44 @@ impl HostList {
                 }
             }
         }
-        barriers.extend(states.iter().filter_map(|(key, (first, last, copy))| {
+        for (key, (first, last, copy)) in states.iter() {
             let real = copy.state.swap(*last, Ordering::Relaxed);
             let real = copying.get(key).copied().unwrap_or(real);
-            (real != *first)
-                .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
-        }));
-        if barriers.is_empty() && syncs.is_empty() {
+            if copy.take_alias_pending() {
+                use windows::Win32::Graphics::Direct3D12::{
+                    D3D12_RESOURCE_ALIASING_BARRIER, D3D12_RESOURCE_BARRIER,
+                    D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    D3D12_RESOURCE_BARRIER_TYPE_ALIASING, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                };
+                const DEPTH_STENCIL: u32 = 2;
+                let target = if copy.flags() & DEPTH_STENCIL != 0 {
+                    D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_DEPTH_WRITE.0)
+                } else {
+                    D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_RENDER_TARGET.0)
+                };
+                alias_barriers.push(D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        Aliasing: std::mem::ManuallyDrop::new(D3D12_RESOURCE_ALIASING_BARRIER {
+                            pResourceBefore: std::mem::ManuallyDrop::new(None),
+                            pResourceAfter: std::mem::ManuallyDrop::new(Some(copy.texture.clone())),
+                        }),
+                    },
+                });
+                if real != target.0 as u32 {
+                    alias_to_target.push(transition(&copy.texture, host_state(real), target));
+                }
+                alias_discards.push(copy.texture.clone());
+                if target.0 as u32 != *first {
+                    alias_from_target.push(transition(&copy.texture, target, host_state(*first)));
+                }
+            } else if real != *first {
+                barriers.push(transition(&copy.texture, host_state(real), host_state(*first)));
+            }
+        }
+        if barriers.is_empty() && syncs.is_empty() && alias_barriers.is_empty() {
             return None;
         }
         let Some((allocator, list)) = self
@@ -6771,6 +6901,38 @@ impl HostList {
         let recorded = unsafe {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
+                if !alias_barriers.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: activate reused ranges ({})", alias_barriers.len()),
+                    );
+                    list.ResourceBarrier(&alias_barriers);
+                }
+                if !alias_to_target.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: enter RT/DS use ({})", alias_to_target.len()),
+                    );
+                    list.ResourceBarrier(&alias_to_target);
+                }
+                for texture in &alias_discards {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: discard target {:#x}", texture.as_raw() as usize),
+                    );
+                    list.DiscardResource(texture, None);
+                }
+                if !alias_from_target.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: restore first-use state ({})", alias_from_target.len()),
+                    );
+                    list.ResourceBarrier(&alias_from_target);
+                }
                 if !to_copy.is_empty() {
                     list.ResourceBarrier(&to_copy);
                 }
@@ -7816,6 +7978,7 @@ enum Touch {
     /// The copy is given to shaders.
     Write(usize),
     /// Title memory is written.
+    #[allow(dead_code)] // Explicit boundary marker retained for written-span callers.
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -8772,6 +8935,7 @@ impl Meter {
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
+        memory_benchmark_line(fps, ms);
         let draws = (drawn - self.drawn) as f64 / frames;
         crate::overlay::set_frame(fps, ms, draws);
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
@@ -9037,6 +9201,64 @@ impl Meter {
                     }
                 });
         });
+    }
+}
+
+/// Optional once-per-second system/adapter memory row for reproducible
+/// comparisons. Private commit, working set, local GPU use and shared GPU
+/// use remain separate quantities.
+fn memory_benchmark_line(fps: f64, frame_ms: f64) {
+    use std::io::Write;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| {
+        std::env::var_os("VICTORY_MEMORY_BENCH_CSV").filter(|p| !p.is_empty()).map(Into::into)
+    }).as_ref() else { return };
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let Some(file) = FILE.get_or_init(|| {
+        let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(?path, %error, "memory benchmark CSV could not be opened");
+                return None;
+            }
+        };
+        if file.metadata().is_ok_and(|m| m.len() == 0) {
+            let _ = writeln!(file, "utc_ms,elapsed_ms,frame,fps,frame_ms,private_commit_bytes,working_set_bytes,local_budget_bytes,local_used_bytes,shared_budget_bytes,shared_used_bytes,queued_textures,due_textures,waiting_memory_textures,partial_textures,oldest_due_frames");
+        }
+        Some(Mutex::new(file))
+    }).as_ref() else { return };
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: correctly sized counters and this process' pseudo-handle.
+    let memory_ok = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        ) != 0
+    };
+    let groups = host().and_then(|h| h.video_memory_groups());
+    let local = groups.map_or([0; 4], |g| g[0]);
+    let shared = groups.map_or([0; 4], |g| g[1]);
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let elapsed_ms = START.get_or_init(std::time::Instant::now).elapsed().as_millis();
+    let utc_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_millis());
+    let queue = crate::draw::HEAP_TEXTURES_QUEUE.each_ref().map(|n| n.load(Ordering::Relaxed));
+    let (commit, working) = if memory_ok { (counters.PrivateUsage as u64, counters.WorkingSetSize as u64) } else { (0, 0) };
+    let row = format!(
+        "{utc_ms},{elapsed_ms},{},{fps:.3},{frame_ms:.3},{commit},{working},{},{},{},{},{},{},{},{},{}",
+        crate::frame::current(), local[0], local[1], shared[0], shared[1],
+        queue[0], queue[1], queue[2], queue[3], queue[4]
+    );
+    if let Err(error) = writeln!(*file.lock().unwrap_or_else(|e| e.into_inner()), "{row}") {
+        tracing::warn!(?path, %error, "memory benchmark CSV write failed");
     }
 }
 
