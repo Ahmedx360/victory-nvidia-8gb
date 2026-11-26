@@ -35,7 +35,7 @@ $manifest = Join-Path $out 'run.txt'
     "mode=$Mode"
     "console=$Console"
     "drop_mips=$DropMips"
-    'staging_cache_mb=512'
+    'staging_cache_mb=0'
     'target_audit=1'
     "started_utc=$([DateTime]::UtcNow.ToString('o'))"
     "runner_sha256=$((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash)"
@@ -65,13 +65,19 @@ try {
         $old[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
         [Environment]::SetEnvironmentVariable($key, [string]$settings[$key], 'Process')
     }
-    & $launcher pareto-residency 2>&1 | Tee-Object -FilePath $log
+    # Windows PowerShell promotes native stderr to ErrorRecord objects. With
+    # ErrorActionPreference=Stop, ordinary tracing lines would abort the
+    # pipeline before the game starts. Merge streams in cmd.exe instead.
+    $batch = 'call "{0}" pareto-residency' -f $launcher
+    $redirected = '(' + $batch + ') > "' + $log + '" 2>&1'
+    & $env:ComSpec /d /s /c $redirected
     $result = $LASTEXITCODE
 } finally {
     foreach ($key in $settings.Keys) {
         [Environment]::SetEnvironmentVariable($key, $old[$key], 'Process')
     }
 }
+if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 | Write-Output }
 "exit_status=$result" | Add-Content -LiteralPath $manifest
 Write-Output "Capture=$out"
 Write-Output "After closing the game: powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'analyze-pc2-memory-benchmark.ps1')`" -Csv `"$csv`" -SceneStartSeconds <offset>"
