@@ -77,7 +77,9 @@ pub fn run(
     // frame is the display's size instead of the console's 4K.
     let resolution = std::env::var("VICTORY_RESOLUTION").ok().and_then(|text| {
         let (w, h) = text.split_once('x')?;
-        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        let width = w.trim().parse::<u32>().ok()?;
+        let height = h.trim().parse::<u32>().ok()?;
+        (width > 0 && height > 0).then_some((width, height))
     });
     if let Some((width, height)) = resolution {
         let base = image.base();
@@ -90,7 +92,10 @@ pub fn run(
             let changed =
                 unsafe { victory_game::output::cap_ladder(base as *mut u8, size, width, height) };
             println!("resolution     {changed} ladder entry(ies) capped to {width}x{height}");
-            if let Some(at) = unsafe { victory_game::output::assert_site(base as usize, size) } {
+            // SAFETY: the mapped image spans `size` bytes.
+            if changed != 0
+                && let Some(at) = unsafe { victory_game::output::assert_site(base as usize, size) }
+            {
                 // SAFETY: `at` lies inside the image, made writable above.
                 unsafe { std::ptr::write_bytes(at as *mut u8, 0x90, 1) };
                 println!("resolution     int3 at {at:#x} patched to nop");

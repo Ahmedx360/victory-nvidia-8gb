@@ -166,6 +166,17 @@ pub(crate) fn vram_keep(budget: u64, used: u64) -> (u64, u64) {
     }
 }
 
+/// An explicit timeout applies to both policies used by the texture sweep.
+pub(crate) fn vram_idle_override() -> Option<u64> {
+    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("VICTORY_VRAM_IDLE_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|ms| ms.max(1_000))
+    })
+}
+
 /// Effective idle timeout (in milliseconds) for VRAM-backed host textures,
 /// scaled down under VRAM pressure. Never returns less than 1,000 ms so
 /// handles not yet recorded into a list or slot remain protected.

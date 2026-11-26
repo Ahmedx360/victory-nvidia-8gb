@@ -2044,6 +2044,7 @@ pub(crate) fn let_go_idle() {
         }
         _ => (crate::host::vram_idle_ms(memory), u64::MAX),
     };
+    let idle_ms = crate::host::vram_idle_override().unwrap_or(idle_ms);
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
