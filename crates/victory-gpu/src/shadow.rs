@@ -2844,6 +2844,7 @@ pub(crate) fn let_go_idle() {
         idle.into_iter().filter_map(|key| map.remove(&key)).collect()
     };
     if !gone.is_empty() {
+        tables_changed();
         let (went, bytes) = (gone.len(), gone.iter().map(|s| s.len).sum::<u64>());
         crate::host::trail(|| {
             format!("sweep: {went} host copies of windows of title memory let go ({} KiB), held by no list and no slot", bytes >> 10)
@@ -4258,18 +4259,21 @@ fn buffers_shared() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize)
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
-    buffers().insert(
+    let mut map = buffers();
+    map.insert(
         (start, resource),
         Entry {
             end: start + len,
             shadow: None,
         },
     );
+    tables_changed();
 }
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
     buffers().remove(&(start, resource));
+    tables_changed();
 }
 
 /// The title buffer holding `address`, as (start, length), without making
@@ -4310,6 +4314,9 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
         }
     }
     let n = gone.len() as u64;
+    if n > 0 {
+        tables_changed();
+    }
     for shadow in gone {
         crate::host::retire(shadow);
     }
@@ -4386,7 +4393,93 @@ fn exact_for(range: Option<&ExactRange<'_>>, offset: u64) -> Option<Arc<Shadow>>
     exact(start, bytes)
 }
 
+/// Counts the changes of the tables [`lookup`] reads that can change what an
+/// ask finds: a buffer registered or released, a copy taken out of a table,
+/// a window made. A thread's remembered answers ([`FOUND`]) are from one
+/// count.
+static TABLES_CHANGED: AtomicU64 = AtomicU64::new(0);
+
+fn tables_changed() {
+    TABLES_CHANGED.fetch_add(1, Ordering::Release);
+}
+
+/// Since the last frame line: asks answered from a thread's own memory of
+/// them, and asks that went to the tables.
+pub(crate) static LOOKUPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Whether a thread remembers what its asks found (fork pull request
+/// #1237; `VICTORY_LOOKUP_CACHE=1`).
+fn lookup_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LOOKUP_CACHE").is_none_or(|v| v != "0"))
+}
+
+const FOUND_MOST: usize = 8192;
+
+type Found = std::collections::HashMap<(u64, u64, bool), std::sync::Weak<Shadow>>;
+
+thread_local! {
+    static FOUND: std::cell::RefCell<(u64, Found)> = std::cell::RefCell::new((u64::MAX, Found::new()));
+}
+
+fn note_window(shadow: &Shadow, address: u64, end: u64, unsized_ask: bool) {
+    shadow.used.store(crate::host::moment(), Ordering::Relaxed);
+    shadow.asked[0].fetch_min(address, Ordering::Relaxed);
+    shadow.asked[1].fetch_max(end, Ordering::Relaxed);
+    if unsized_ask {
+        shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn lookup(
+    address: u64,
+    len: u64,
+    any: bool,
+    range: Option<&ExactRange<'_>>,
+) -> Option<(Arc<Shadow>, bool)> {
+    if !lookup_cache() || range.is_some() {
+        return lookup_tables(address, len, any, range);
+    }
+    let changes = TABLES_CHANGED.load(Ordering::Acquire);
+    let found = FOUND.with(|f| {
+        let f = &mut *f.borrow_mut();
+        if f.0 != changes {
+            f.1.clear();
+            f.0 = changes;
+        }
+        f.1.get(&(address, len, any)).and_then(std::sync::Weak::upgrade)
+    });
+    if let Some(shadow) = found.filter(|shadow| {
+        if !shadow.window {
+            return true;
+        }
+        let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+        if !map.get(&(shadow.start, shadow.len)).is_some_and(|entry| Arc::ptr_eq(entry, shadow)) {
+            return false;
+        }
+        note_window(shadow, address, address.saturating_add(len.max(1)), len <= 1);
+        true
+    }) {
+        LOOKUPS[0].fetch_add(1, Ordering::Relaxed);
+        return Some((shadow, false));
+    }
+    LOOKUPS[1].fetch_add(1, Ordering::Relaxed);
+    let result = lookup_tables(address, len, any, range)?;
+    if !result.1 {
+        FOUND.with(|f| {
+            let f = &mut *f.borrow_mut();
+            if f.0 == changes {
+                if f.1.len() >= FOUND_MOST {
+                    f.1.clear();
+                }
+                f.1.insert((address, len, any), Arc::downgrade(&result.0));
+            }
+        });
+    }
+    Some(result)
+}
+
+fn lookup_tables(
     address: u64,
     len: u64,
     any: bool,
@@ -4701,6 +4794,7 @@ fn loose(
         let shadow = Arc::new(Shadow::placed(placed, rs, rl, true, true));
         note(&shadow);
         map.insert((rs, rl), shadow.clone());
+        tables_changed();
         return Some((shadow, false));
     }
     // In place, if asked for and the window's memory can be opened: the
@@ -4709,6 +4803,7 @@ fn loose(
         let shadow = Arc::new(Shadow::placed(placed, start, len, true, false));
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some((shadow, false));
     }
     // In a GPU upload heap, if asked for and there is room: one buffer in
@@ -4723,6 +4818,7 @@ fn loose(
         let shadow = Arc::new(shadow);
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some((shadow, false));
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
@@ -4760,6 +4856,7 @@ fn loose(
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());
+    tables_changed();
     Some((shadow, false))
 }
 
