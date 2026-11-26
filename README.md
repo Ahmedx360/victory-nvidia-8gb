@@ -1,4 +1,4 @@
-# VIctory NVIDIA 8 GB with cool_fox
+# Adel's VIctory NVIDIA 8 GB
 
 ## Older Windows D3D12 runtimes
 

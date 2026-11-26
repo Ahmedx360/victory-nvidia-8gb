@@ -32,6 +32,28 @@ pub(crate) fn texture_state(state: u32) -> u32 {
     pc_state(state) & !BUFFER_ONLY
 }
 
+/// The name this fork shows in the running title's caption and the overlay.
+pub(crate) const FORK_LABEL: &str = "adel";
+/// The upstream name this fork replaces in the title's own caption.
+const UPSTREAM_LABEL: &str = "soldsawn";
+
+/// The title's own window caption is where the runner shows which fork is
+/// running the game. Replace the upstream name with ours, whatever case it
+/// used, without touching the rest of the title's text.
+fn rebrand_caption(caption: &str) -> String {
+    let lower = caption.to_ascii_lowercase();
+    let mut out = String::with_capacity(caption.len());
+    let mut at = 0;
+    while let Some(rel) = lower[at..].find(UPSTREAM_LABEL) {
+        let start = at + rel;
+        out.push_str(&caption[at..start]);
+        out.push_str(FORK_LABEL);
+        at = start + UPSTREAM_LABEL.len();
+    }
+    out.push_str(&caption[at..]);
+    out
+}
+
 /// Render target views live only until their command is recorded, so a
 /// ring of host descriptors is enough.
 const RTV_RING: u32 = 1024;
@@ -1041,6 +1063,15 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_caption_uses_our_fork_name() {
+        assert_eq!(super::rebrand_caption("soldsawn 8GB"), "adel 8GB");
+        assert_eq!(super::rebrand_caption("Soldsawn 8GB"), "adel 8GB");
+        assert_eq!(super::rebrand_caption("SOLDSAWN 8GB"), "adel 8GB");
+        assert_eq!(super::rebrand_caption("another fork"), "another fork");
+        assert_eq!(super::rebrand_caption(""), "");
+    }
+
     /// A list of ours is found by its name, with the debug layer's note or not.
     #[cfg(feature = "diagnostics")]
     #[test]
@@ -8974,10 +9005,11 @@ impl Meter {
             // SAFETY: a window handle and a buffer of that length.
             let n = unsafe { InternalGetWindowText(hwnd, &mut buffer) };
             buffer.truncate(n.max(0) as usize);
-            self.caption = Some(buffer);
+            let caption = String::from_utf16_lossy(&buffer);
+            self.caption = Some(rebrand_caption(&caption).encode_utf16().collect());
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let text = format!(" | {FORK_LABEL} VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
