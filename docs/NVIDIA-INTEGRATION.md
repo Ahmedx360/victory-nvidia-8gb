@@ -64,8 +64,12 @@ from movies to gameplay to check the read-back and two-plane fixes.
 
 ## Memory census and low-memory switches
 
-These cover tasks 1, 3–7 and 13 of the memory plan (PC 1). All are off or
-unchanged by default; nothing here changes a stock run.
+These cover tasks 1, 3–7 and 13 of the memory plan (PC 1). Most are off by
+default. The one stock-run change is the byte cap on idle single-view copies:
+it now keeps at most 64 MiB by default, where before only the 256-copy count
+was capped. Raise `VICTORY_VIEW_COPIES_MB` to keep more, or set it to 0 to
+keep none. No stock-versus-`-LowMemory` frame-time comparison is included
+here; capture one before relying on this being neutral for your title.
 
 | Setting | Effect |
 | --- | --- |
