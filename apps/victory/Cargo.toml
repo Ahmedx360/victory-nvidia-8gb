@@ -22,6 +22,11 @@ clap.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
 
+[build-dependencies]
+sha2 = "0.10.9"
+ureq = "2.12.1"
+zip = { version = "2.2.3", default-features = false, features = ["deflate"] }
+
 [features]
 # Debug-level logs and the debugging switches (frame capture, stack dumps,
 # the host debug layer, scripted keys). Off in a plain release build.
