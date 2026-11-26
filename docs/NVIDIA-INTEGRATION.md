@@ -25,13 +25,30 @@ These are different GPUs, workloads, and configurations.
 
 The integration retains thin LTO, the optional resolution cap and
 borderless workaround, Agility SDK 620 exports, and the optional
-`VICTORY_VRAM_IDLE_MS` override. It uses cool_fox's residency and
-mip-on-demand paths. Fork-specific features still absent include forced mip
-dropping (`VICTORY_TEXTURE_DROP_MIPS`), the F10 overlay, the divergent
-cross-half shader experiment, and GPU optimizations and test changes that
-differ from the cool_fox implementations. Forced mip dropping needs its
-own port and runtime test because it changes host subresource indices and
-the upload, copy, read-back, and tiled-texture paths all use those indices.
+`VICTORY_VRAM_IDLE_MS` override.
+
+## NVIDIA features and experiments
+
+| Feature or original switch | Integration status |
+| --- | --- |
+| F10 performance overlay | Restored from the Neptune-derived NVIDIA overlay. `VICTORY_OVERLAY=0` and `-NoOverlay` disable it. |
+| `VICTORY_TEXTURE_MAX_DIM` | Restored as an opt-in cap on title-memory uploads for eligible tiled 2D textures. It requires `VICTORY_LEVELS_ON_DEMAND=1` and tiled resource support. GPU writes can still make levels resident. |
+| `VICTORY_RAM_TRIM_MB` | Restored as an opt-in free-physical-memory threshold. It releases spare scratch and snapshots, trims reset lists, and lowers idle RAM retention. |
+| `VICTORY_CLAMP_WAITS=0` | Restored for experiments on the single-clamp fallback. Leaving the waits enabled is the default. Validate indirect arguments and output on hardware before using it in a preset. |
+| `VICTORY_LOOKUP_CACHE` and `VICTORY_BIND_CACHE` | The current renderer caches buffer lookups per thread and render-target binds per list. The old lookup switch is accepted as an alias when `VICTORY_QUICK_FIND` is unset. |
+| `VICTORY_STEP_INDEX` | Current submission preparation indexes refreshes and shader-write ranges by copy and deduplicates ranges. The old experimental switch itself has no effect. |
+| `VICTORY_CARD_SYNC_BATCH` | The current renderer records card uploads, transitions, and rehashes in distinct phases. The older toggle has no equivalent off path. |
+| `VICTORY_HEAP_PASS_MARKED` and `VICTORY_LIST_REUSE` | Separate experiments remain open. The current renderer already scopes bindless texture refreshes and can run heap passes beside recording. Those paths do not establish parity with the old marked-slot pass or keep and root-view reuse. |
+| `VICTORY_FILLS_PLAIN` and `VICTORY_COPY_PLAIN` | The earlier guarded direct-copy implementation needs a port to the merged mapped-copy path. Current fills can run in parallel. |
+| `VICTORY_CARD_REHASH_GAP` | Touching ranges already coalesce. A wider gap changes which pieces get hashed, so it needs an ordering and read-back check before porting. |
+| `VICTORY_TARGET_VARIANTS` and the alias refresh change | The fork's bound-target pipeline variants and shader-written alias change need separate rendering regression tests. |
+| `VICTORY_EXACT_WAVES` and `VICTORY_EXACT_FIRSTLANE` | Divergent cross-half exchange can hang when only one half reaches a group barrier. A safe port needs a way to verify both halves reach the exchange. |
+| `VICTORY_TEXTURE_DROP_MIPS` | Forced mip dropping needs a port and runtime tests for host subresource indices across uploads, copies, read-back, and tiled textures. The restored dimension cap gives us a separate low-VRAM experiment. |
+
+For Windows A/B comparisons set `VICTORY_OVERLAY=0` on each build. On the
+integrated build, compare the stock pareto profile against the same profile
+with `VICTORY_TEXTURE_MAX_DIM=1024` separately from RAM trimming. Record
+peak dedicated VRAM, streaming stalls, and any visible change to textures.
 
 ## Windows comparison
 
