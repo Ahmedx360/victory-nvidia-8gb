@@ -1,4 +1,4 @@
-# VIctory on an RX 7900 XTX
+# VIctory NVIDIA 8 GB with cool_fox
 
 ## Older Windows D3D12 runtimes
 
@@ -8,18 +8,29 @@ For the Windows 11 21H2 setup used with the GTX 1660, place the x64
 `D3D12` directory next to the executable. See the
 [GTX 1660 test notes](docs/HARDWARE-GTX1660.md) for the previous build results.
 
-## Run the codec_d Windows build
+## Run the pareto-residency profile
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+Build from this checkout with the pinned Rust toolchain, MSVC C++ Build
+Tools, and the Windows SDK. The launcher selects Series S and the residency
+settings from the RTX build. Use your own title files.
 
 ```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
+cargo build --release --locked -p victory
+$env:VICTORY_GAME_DIR = 'D:\path\to\your\title'
+$env:VICTORY_RUNNER = (Resolve-Path .\target\release\victory.exe).Path
 .\Play-VIctory.cmd pareto-residency
 ```
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+Set `VICTORY_CONSOLE=series-x` to use Series X with the same launcher.
+`VICTORY_RESOLUTION=1920x1080` caps the recognized resolution ladder.
+For an independent-flip black window, set `VICTORY_WINDOW_PERCENT=88`
+with an explicit `VICTORY_RESOLUTION` or `VICTORY_WINDOW_SIZE`.
+Set `VICTORY_CACHE_DIR` to choose a cache outside the checkout. The
+launcher defaults to `%LOCALAPPDATA%\VIctory\cache-pareto`.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+See the [performance comparison and test plan](docs/NVIDIA-INTEGRATION.md).
+
+## Upstream RX 7900 XTX notes
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
