@@ -4,8 +4,10 @@
 //! or `victory run --no-telemetry`) as the opt-out. Every run writes a full
 //! local bundle before attempting an HTTPS upload, so a network failure never
 //! loses the data and never affects the game. Heavily compressed game-window
-//! JPEGs are also captured every ten seconds for the first ten minutes. No game
-//! files, usernames, paths or addresses are collected.
+//! JPEGs are also captured every ten seconds for the first ten minutes, and
+//! bounded Victory/title crash and game logs are uploaded at the end. No game
+//! packages, usernames, or network addresses are collected; log text is
+//! redacted on the server.
 
 // On non-Windows hosts only the portable maths and tests are compiled: there
 // is no recorder to call them, so the Windows-side plumbing is intentionally
@@ -13,6 +15,7 @@
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 pub mod json;
+mod logs;
 pub mod metrics;
 mod summary;
 #[cfg(windows)]
@@ -40,6 +43,9 @@ pub struct Options {
     pub console: String,
     /// Explicit opt-out from the CLI or the config file.
     pub disabled: bool,
+    /// Roots scanned at the end of the run for crash/game logs (for example
+    /// `crashes.log` and the title `T:` temp directory).
+    pub log_roots: Vec<PathBuf>,
 }
 
 /// Owns the recorder thread. `finish` joins it so the final bundle is written;
@@ -149,10 +155,12 @@ fn notice(dir: &std::path::Path) {
         "adel VIctory sends anonymous performance reports to https://rxnd.de/vi \
          so frame-rate regressions can be compared across builds. Reports contain \
          PC specs, driver versions, screen size, temperatures where available, \
-         the exact FPS timeline, and heavily compressed game-window screenshots \
-         every ten seconds for the first ten minutes. They contain no game files, \
-         usernames, file paths or network addresses. Your machine has an anonymous \
-         random key so runs from different PCs can be told apart.\n\n\
+         the exact FPS timeline, heavily compressed game-window screenshots every \
+         ten seconds for the first ten minutes, and bounded Victory/title crash \
+         and game log files from the run. They contain no game packages, usernames \
+         or network addresses; embedded paths in logs are redacted on the server. \
+         Your machine has an anonymous random key so runs from different PCs can \
+         be told apart.\n\n\
          Opt out with VICTORY_TELEMETRY=0, [telemetry] enabled = false in \
          victory.toml, or victory run --no-telemetry. Local copies of every report \
          stay in this directory.\n",
@@ -355,13 +363,28 @@ fn record(options: Options, stop: Receiver<()>) {
     let mut cursor = metrics::Cursor::default();
     let began = Instant::now();
     let mut next_shot = 1u8;
+    let mut uploaded_logs = std::collections::BTreeSet::new();
     maybe_capture_screenshot(&dir, &id, token.as_deref(), Duration::ZERO, &mut next_shot);
+    let mut last_log_scan = Instant::now() - Duration::from_secs(30);
     loop {
         match stop.recv_timeout(Duration::from_millis(100)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         maybe_capture_screenshot(&dir, &id, token.as_deref(), began.elapsed(), &mut next_shot);
+        if last_log_scan.elapsed() >= Duration::from_secs(30) {
+            if let Some(token) = token.as_deref() {
+                upload_logs(
+                    &dir,
+                    &id,
+                    token,
+                    &options.log_roots,
+                    began,
+                    &mut uploaded_logs,
+                );
+            }
+            last_log_scan = Instant::now();
+        }
         let windows = metrics::drain(&mut cursor);
         let (cpu_pct, gpu_pct, ram_mb) = windows::rates();
         let (cpu_temp_c, cpu_temp_reason, gpu_temp_c, gpu_temp_reason) = windows::temperatures();
@@ -414,8 +437,61 @@ fn record(options: Options, stop: Receiver<()>) {
     ]);
     if let Some(token) = &token {
         post("/vi/v1/ingest", &bundle.to_string(), Some(token));
+        upload_logs(
+            &dir,
+            &id,
+            token,
+            &options.log_roots,
+            began,
+            &mut uploaded_logs,
+        );
     }
     tracing::info!(run = %id, samples = samples.len(), "telemetry report written to {}", dir.display());
+}
+
+#[cfg(windows)]
+fn upload_logs(
+    dir: &std::path::Path,
+    run_id: &str,
+    token: &str,
+    roots: &[PathBuf],
+    began: Instant,
+    already: &mut std::collections::BTreeSet<String>,
+) {
+    let started = SystemTime::now()
+        .checked_sub(began.elapsed())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let files = logs::collect(roots, started);
+    if files.is_empty() {
+        return;
+    }
+    let local = dir.join(format!("logs-{run_id}"));
+    let _ = std::fs::create_dir_all(&local);
+    for (name, path) in files {
+        let key = format!("{name}:{}", path.metadata().map(|m| m.len()).unwrap_or(0));
+        if !already.insert(key) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let _ = std::fs::write(local.join(&name), &bytes);
+        let remote = format!("/vi/v1/runs/{run_id}/logs/{name}");
+        let content_type = if name.to_ascii_lowercase().ends_with(".dmp") {
+            "application/octet-stream"
+        } else {
+            "text/plain; charset=utf-8"
+        };
+        match windows::post_bytes(&remote, &bytes, content_type, token) {
+            Ok((status, _)) if (200..300).contains(&status) => {}
+            Ok((status, response)) => {
+                tracing::warn!(status, response = %response, log = %name, "telemetry log rejected")
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, log = %name, "telemetry log upload failed; local copy kept")
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -220,6 +220,11 @@ pub fn run(
                 title_hash: hash.to_string(),
                 console: victory_hle::console::current().name().to_owned(),
                 disabled: false,
+                log_roots: vec![
+                    temp.with_file_name("crashes.log"),
+                    temp.clone(),
+                    title_dir.to_path_buf(),
+                ],
             }),
             Err(error) => {
                 tracing::warn!(%error, "telemetry directory unavailable; continuing without telemetry");

@@ -383,6 +383,28 @@ pub fn post_jpeg(path: &str, body: &[u8], token: &str) -> Result<(u16, String), 
     )
 }
 
+/// Binary/text upload for run logs (larger bodies, longer send window).
+pub fn post_bytes(
+    path: &str,
+    body: &[u8],
+    content_type: &str,
+    token: &str,
+) -> Result<(u16, String), String> {
+    request(
+        "POST",
+        path,
+        body,
+        content_type,
+        Some(token),
+        Timeouts {
+            resolve: 3000,
+            connect: 3000,
+            send: 30_000,
+            receive: 30_000,
+        },
+    )
+}
+
 pub fn token_machine_id(token: &str) -> Option<String> {
     let (status, body) = request(
         "GET",
