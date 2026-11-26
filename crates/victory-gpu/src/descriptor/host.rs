@@ -2084,10 +2084,24 @@ impl HostHeap {
         let mut looked = 0u64;
         let mut tabled = 0u64;
         due.clear();
+        let all_zero = |slice: &[u8]| -> bool {
+            let (chunks, rem) = slice.as_chunks::<8>();
+            chunks.iter().all(|c| u64::from_ne_bytes(*c) == 0) && rem.iter().all(|&b| b == 0)
+        };
         {
             let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
             if copied.is_empty() {
                 copied.resize(self.count as usize, 0);
+            }
+            // Fast path: if the entire 4 KiB page is zero and every slot in
+            // `slots` is still untouched (`*last == 0`), skip the whole page
+            // without hashing individual descriptor records.
+            if all_zero(page) {
+                let lo = (slots.start as usize).min(copied.len());
+                let hi = (slots.end as usize).min(copied.len());
+                if copied[lo..hi].iter().all(|&last| last == 0) {
+                    return (slots.end.saturating_sub(slots.start), 0);
+                }
             }
             for index in slots {
                 let handle = start + index * step;
@@ -2104,11 +2118,14 @@ impl HostHeap {
                 let Some(last) = copied.get_mut(index as usize) else {
                     continue;
                 };
+                // Skip untouched zero slots BEFORE computing `record_print` hash.
+                if *last == 0 && all_zero(record) {
+                    continue;
+                }
                 // Never 0, which is "never looked at".
                 let print = record_print(record) | 1;
-                // The record last seen, or a slot never looked at that
-                // holds nothing: as it was.
-                if *last == print || (*last == 0 && record.iter().all(|&b| b == 0)) {
+                // The record last seen: as it was.
+                if *last == print {
                     continue;
                 }
                 // A table's slot lately: left to its draws, and looked at
