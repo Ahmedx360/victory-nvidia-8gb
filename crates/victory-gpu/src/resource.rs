@@ -101,7 +101,7 @@ pub(crate) struct ResourceDesc {
 #[cfg(windows)]
 impl ResourceDesc {
     /// The texture of this one's levels from `base` on.
-    fn from_level(&self, base: u32) -> ResourceDesc {
+    fn levels_from(&self, base: u32) -> ResourceDesc {
         let mut d = *self;
         if base > 0 {
             d.width = (d.width >> base).max(1);
@@ -1297,6 +1297,7 @@ pub(crate) fn held_only() -> bool {
 pub(crate) fn first_mip(view: &[u32]) -> u32 {
     const TEXTURE_2D_VIEW: u32 = 4;
     match *view {
+        [_, TEXTURE_2D_VIEW, _, _, first, ..] if first == u32::MAX => u32::MAX,
         [_, TEXTURE_2D_VIEW, _, _, first, ..] => first.min(15),
         _ => 0,
     }
@@ -1639,7 +1640,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         }
         let texture = match texture {
             Some(texture) => Some(texture),
-            None => host_texture(&r.desc.from_level(base), r.host.state, clear),
+            None => host_texture(&r.desc.levels_from(base), r.host.state, clear),
         };
         let Some(texture) = texture else {
             r.host.refused.store(true, Relaxed);
@@ -2639,7 +2640,7 @@ fn host_texture_as(
         }
     };
     if let Err(e) = &made {
-        crate::residency::allocation_error(&e);
+        crate::residency::allocation_error(e);
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");
     }
     if !reserved
@@ -3060,6 +3061,7 @@ static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// See [`PLACED_TWINS`].
 #[cfg(windows)]
+#[allow(dead_code)] // Read by the optional memory census/report path.
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -3407,6 +3409,13 @@ pub(crate) fn test_buffer(width: u64) -> This {
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[test]
+    fn first_mip_preserves_unspecified_sentinel_and_caps_real_levels() {
+        assert_eq!(first_mip(&[0, 4, 0, 0, u32::MAX]), u32::MAX);
+        assert_eq!(first_mip(&[0, 4, 0, 0, 18]), 15);
+        assert_eq!(first_mip(&[0, 4, 0, 0, 3]), 3);
+    }
 
     #[test]
     fn a8_unorm_is_not_in_the_r8_typeless_family() {

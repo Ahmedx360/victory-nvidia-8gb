@@ -1348,6 +1348,15 @@ pub(crate) struct HostList {
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
 
+/// Put DRED-visible labels directly on the prelude command list. These are
+/// intentionally emitted only by diagnostics builds.
+#[cfg(feature = "diagnostics")]
+fn prelude_breadcrumb(list: &ID3D12GraphicsCommandList, label: &str) {
+    let text: Vec<u16> = label.encode_utf16().chain([0]).collect();
+    // SAFETY: the list is open and copies the marker text during the call.
+    unsafe { list.SetMarker(0, Some(text.as_ptr().cast()), (text.len() * 2) as u32) };
+}
+
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
 /// it; lists that name no texture never have one, and every host list was
@@ -2802,6 +2811,8 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+// Keep the hot submission payload inline; each element is one flight.
+#[allow(clippy::large_enum_variant)]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -3028,7 +3039,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -3827,6 +3838,7 @@ fn late_line(frames: f64) {
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
@@ -6890,15 +6902,35 @@ impl HostList {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
                 if !alias_barriers.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: activate reused ranges ({})", alias_barriers.len()),
+                    );
                     list.ResourceBarrier(&alias_barriers);
                 }
                 if !alias_to_target.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: enter RT/DS use ({})", alias_to_target.len()),
+                    );
                     list.ResourceBarrier(&alias_to_target);
                 }
                 for texture in &alias_discards {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: discard target {:#x}", texture.as_raw() as usize),
+                    );
                     list.DiscardResource(texture, None);
                 }
                 if !alias_from_target.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    prelude_breadcrumb(
+                        list,
+                        &format!("alias prelude: restore first-use state ({})", alias_from_target.len()),
+                    );
                     list.ResourceBarrier(&alias_from_target);
                 }
                 if !to_copy.is_empty() {
@@ -7946,6 +7978,7 @@ enum Touch {
     /// The copy is given to shaders.
     Write(usize),
     /// Title memory is written.
+    #[allow(dead_code)] // Explicit boundary marker retained for written-span callers.
     Title,
     Nothing,
     /// Another part of the submission begins.

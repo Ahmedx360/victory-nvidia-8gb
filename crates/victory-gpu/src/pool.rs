@@ -96,6 +96,20 @@ fn target_spare_cap() -> usize {
     SPARE
 }
 
+/// RT/DS heap aliasing is experimental and stays off unless explicitly
+/// enabled after a stability comparison (`VICTORY_TARGET_POOL=1`).
+fn target_pool_on() -> bool {
+    target_pool_enabled(std::env::var_os("VICTORY_TARGET_POOL").as_deref())
+}
+
+fn target_pool_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "1")
+}
+
+fn ripe_ahead(cap: usize) -> usize {
+    ahead().min(cap)
+}
+
 /// Blocks for a setting in MiB; no cap without one.
 fn blocks_for(setting: Option<&str>) -> usize {
     setting
@@ -158,10 +172,10 @@ struct Ripe {
 impl Ripe {
     const ALL: Ripe = Ripe { started: 0, finished: 0, ahead: 0 };
 
-    fn now() -> Ripe {
+    fn now(ahead_cap: usize) -> Ripe {
         let (started, finished) = crate::host::submissions();
-        // Not more than are kept ([`room`]): they would go and be made again.
-        Ripe { started, finished, ahead: ahead().min(SPARES.load(Ordering::Relaxed)) }
+        // Do not make more speculative blocks than this pool can retain.
+        Ripe { started, finished, ahead: ripe_ahead(ahead_cap) }
     }
 
     fn is<B>(self, block: &Block<B>) -> bool {
@@ -615,31 +629,37 @@ pub(crate) unsafe fn texture(
         return None;
     }
     #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
-    let (piece, heap, again) = lock(&TEXTURES).take_ripe(info.SizeInBytes, info.Alignment.max(1), now(), Ripe::now(), || {
-        if !crate::budget::admit_pool_growth(crate::host::host().and_then(|host| host.video_memory()), BLOCK) {
-            tracing::debug!(heap_bytes = BLOCK, "texture heap growth refused by shared GPU memory budget");
-            return None;
-        }
-        let desc = D3D12_HEAP_DESC {
-            SizeInBytes: BLOCK,
-            Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
-            Alignment: 0,
-            Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES | crate::host::not_resident(),
-        };
-        let mut heap: Option<ID3D12Heap> = None;
-        // SAFETY: plain creation.
-        if let Err(e) = unsafe { device.CreateHeap(&desc, &mut heap) } {
-            crate::residency::allocation_error(&e);
-            tracing::warn!(error = %e, "no block of texture memory");
-        }
-        if let Some(h) = &heap
-            && let Err(e) = crate::host::resident(device, h).and_then(|()| crate::host::mapped(device))
-        {
-            tracing::warn!(error = %e, "a block of texture memory is not resident");
-            return None;
-        }
-        heap
-    })?;
+    let (piece, heap, again) = lock(&TEXTURES).take_ripe(
+        info.SizeInBytes,
+        info.Alignment.max(1),
+        now(),
+        Ripe::now(SPARES.load(Ordering::Relaxed).min(texture_spare_cap())),
+        || {
+            if !crate::budget::admit_pool_growth(crate::host::host().and_then(|host| host.video_memory()), BLOCK) {
+                tracing::debug!(heap_bytes = BLOCK, "texture heap growth refused by shared GPU memory budget");
+                return None;
+            }
+            let desc = D3D12_HEAP_DESC {
+                SizeInBytes: BLOCK,
+                Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                Alignment: 0,
+                Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES | crate::host::not_resident(),
+            };
+            let mut heap: Option<ID3D12Heap> = None;
+            // SAFETY: plain creation.
+            if let Err(e) = unsafe { device.CreateHeap(&desc, &mut heap) } {
+                crate::residency::allocation_error(&e);
+                tracing::warn!(error = %e, "no block of texture memory");
+            }
+            if let Some(h) = &heap
+                && let Err(e) = crate::host::resident(device, h).and_then(|()| crate::host::mapped(device))
+            {
+                tracing::warn!(error = %e, "a block of texture memory is not resident");
+                return None;
+            }
+            heap
+        },
+    )?;
     let mut made: Option<ID3D12Resource> = None;
     // SAFETY: the piece is no one else's; the heap lives while a piece of
     // it is taken.
@@ -687,7 +707,7 @@ pub(crate) unsafe fn target(
     state: D3D12_RESOURCE_STATES,
     clear: Option<*const D3D12_CLEAR_VALUE>,
 ) -> Option<ID3D12Resource> {
-    if !on() {
+    if !on() || !target_pool_on() {
         return None;
     }
     // SAFETY: a valid description is required from the caller.
@@ -702,7 +722,7 @@ pub(crate) unsafe fn target(
         info.SizeInBytes,
         info.Alignment,
         now(),
-        Ripe::now(),
+        Ripe::now(target_spare_cap()),
         || {
             if !crate::budget::admit_pool_growth(crate::host::host().and_then(|host| host.video_memory()), BLOCK) {
                 tracing::debug!(heap_bytes = BLOCK, "render-target heap growth refused by shared GPU memory budget");
@@ -764,6 +784,19 @@ mod tests {
         assert_eq!(blocks_for(Some("63")), 0);
         assert_eq!(blocks_for(Some("64")), 1);
         assert_eq!(blocks_for(Some(" 256 ")), 4);
+    }
+
+    #[test]
+    fn target_pool_requires_explicit_opt_in() {
+        assert!(!target_pool_enabled(None));
+        assert!(!target_pool_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(target_pool_enabled(Some(std::ffi::OsStr::new("1"))));
+    }
+
+    #[test]
+    fn target_ripe_growth_never_exceeds_target_spare_cap() {
+        assert_eq!(target_spare_cap(), SPARE);
+        assert!(ripe_ahead(target_spare_cap()) <= target_spare_cap());
     }
 
     #[test]
