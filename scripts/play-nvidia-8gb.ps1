@@ -21,15 +21,12 @@ if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
     throw "Title executable missing at $Exe."
 }
-if ($DropMips -gt 0) {
-    Write-Warning 'This build uses mip residency on demand. The DropMips setting has no effect.'
-}
-
 $settings = @{
     VICTORY_TITLE_EXE = (Resolve-Path -LiteralPath $Exe).ProviderPath
     VICTORY_RUNNER = $runner
     VICTORY_CONSOLE = 'series-x'
     VICTORY_RESOLUTION = $Resolution
+    VICTORY_TEXTURE_DROP_MIPS = [string]$DropMips
 }
 if ($Borderless) { $settings.VICTORY_BORDERLESS = '1' }
 if ($Water) { $settings.VICTORY_TEXTURE_BACK = '1' }
