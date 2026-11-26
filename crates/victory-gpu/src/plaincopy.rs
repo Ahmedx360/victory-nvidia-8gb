@@ -333,7 +333,6 @@ pub(crate) fn line(frames: f64) {
         bytes / 1e6,
         wbytes / 1e6
     );
-    );
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
