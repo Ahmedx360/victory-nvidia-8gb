@@ -1,5 +1,13 @@
 # VIctory on an RX 7900 XTX
 
+## Older Windows D3D12 runtimes
+
+The integration retains the NVIDIA fork's D3D12 Agility SDK 620 exports.
+For the Windows 11 21H2 setup used with the GTX 1660, place the x64
+`D3D12Core.dll` from Microsoft.Direct3D.D3D12 version 1.620.2 in the
+`D3D12` directory next to the executable. See the
+[GTX 1660 test notes](docs/HARDWARE-GTX1660.md) for the previous build results.
+
 ## Run the codec_d Windows build
 
 Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
