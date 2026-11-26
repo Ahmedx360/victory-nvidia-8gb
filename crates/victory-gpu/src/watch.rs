@@ -477,7 +477,7 @@ pub(crate) fn writes_into(
         failed as u64,
     );
     #[cfg(feature = "diagnostics")]
-    if failed && !known_view && guarded {
+    if failed && !view && guarded {
         failed_asking(first * PAGE, last * PAGE);
     }
     let guarded = if failed {
@@ -531,7 +531,7 @@ fn failed_asking(start: usize, end: usize) {
     let (protected, clean, absent, viewed, aliased) = {
         let g = guards();
         let b = start / BLOCK;
-        (g.protected.contains(&b), g.clean.contains(&b), g.absent.contains(&b), g.viewed.contains(&b), g.aliased.contains(&b))
+        (g.protected.contains(&b), g.clean.contains(b), g.absent.contains(b), g.viewed.contains(&b), g.aliased.contains(&b))
     };
     tracing::info!(
         "a failed write-watch asking (one in 2048): {start:#x}+{:#x}; Windows says (answered {n}): base {:#x} region {:#x} state {:#x} type {:#x} protect {:#x} allocation protect {:#x}; \
@@ -783,6 +783,13 @@ fn guards() -> std::sync::MutexGuard<'static, Guards> {
 /// copy took it (diagnostics of `VICTORY_BACK_OWN_CHECK`).
 pub(crate) fn clean(page: usize) -> bool {
     guards().clean.contains(page)
+}
+
+/// The sequence number at which `page` was last written (0 if unwritten or
+/// never). Read only, for `crate::backreads`.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn stamp(page: usize) -> u64 {
+    JOURNAL.lock().unwrap_or_else(|e| e.into_inner()).written.get(&page).copied().unwrap_or(0)
 }
 
 /// For view memory: the pages of `[start, end)`'s blocks written since
