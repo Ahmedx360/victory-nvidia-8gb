@@ -1,0 +1,32 @@
+name: Build victory (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked -p victory
+
+      - name: Collect output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\victory.exe dist\
+          Copy-Item target\release\D3D12 dist\D3D12 -Recurse
+          Copy-Item victory.example.toml dist\
+          Copy-Item Play-VIctory.cmd dist\
+          Copy-Item scripts dist\scripts -Recurse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-windows-x64
+          path: dist
