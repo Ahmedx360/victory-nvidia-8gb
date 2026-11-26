@@ -4,10 +4,11 @@
 //! or `victory run --no-telemetry`) as the opt-out. Every run writes a full
 //! local bundle before attempting an HTTPS upload, so a network failure never
 //! loses the data and never affects the game. Heavily compressed game-window
-//! JPEGs are also captured every ten seconds for the first ten minutes, and
-//! bounded Victory/title crash and game logs are uploaded at the end. No game
-//! packages, usernames, or network addresses are collected; log text is
-//! redacted on the server.
+//! JPEGs are also captured every ten seconds for the first twenty minutes, and
+//! bounded Victory/title crash and game logs are uploaded during and at the
+//! end of the run. Failed uploads are retried; local copies are always kept.
+//! No game packages, usernames, or network addresses are collected; log text
+//! is redacted on the server.
 
 // On non-Windows hosts only the portable maths and tests are compiled: there
 // is no recorder to call them, so the Windows-side plumbing is intentionally
@@ -156,7 +157,7 @@ fn notice(dir: &std::path::Path) {
          so frame-rate regressions can be compared across builds. Reports contain \
          PC specs, driver versions, screen size, temperatures where available, \
          the exact FPS timeline, heavily compressed game-window screenshots every \
-         ten seconds for the first ten minutes, and bounded Victory/title crash \
+         ten seconds for the first twenty minutes, and bounded Victory/title crash \
          and game log files from the run. They contain no game packages, usernames \
          or network addresses; embedded paths in logs are redacted on the server. \
          Your machine has an anonymous random key so runs from different PCs can \
@@ -166,6 +167,11 @@ fn notice(dir: &std::path::Path) {
          stay in this directory.\n",
     );
 }
+
+/// First twenty minutes: one JPEG every ten seconds (`001.jpg` … `120.jpg`).
+const SCREENSHOT_WINDOW: Duration = Duration::from_secs(20 * 60);
+const SCREENSHOT_INTERVAL_SECS: u64 = 10;
+const UPLOAD_ATTEMPTS: u32 = 3;
 
 #[cfg(windows)]
 fn load_token(dir: &std::path::Path, machine_id: &str) -> Option<String> {
@@ -181,35 +187,153 @@ fn load_token(dir: &std::path::Path, machine_id: &str) -> Option<String> {
         .chars()
         .take(64)
         .collect();
-    match windows::register(machine_id, &alias) {
-        Ok(token) => {
-            let _ = std::fs::write(&path, &token);
-            Some(token)
+    for attempt in 1..=UPLOAD_ATTEMPTS {
+        match windows::register(machine_id, &alias) {
+            Ok(token) => {
+                let _ = std::fs::write(&path, &token);
+                return Some(token);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    attempt,
+                    "telemetry registration failed; will retry or keep local reports only"
+                );
+                if attempt < UPLOAD_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(400 * u64::from(attempt)));
+                }
+            }
         }
-        Err(error) => {
-            tracing::warn!(error = %error, "telemetry registration failed; keeping local reports only");
-            None
-        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn ensure_token(dir: &std::path::Path, machine_id: &str, token: &mut Option<String>) {
+    if token.is_none() {
+        *token = load_token(dir, machine_id);
     }
 }
 
 #[cfg(windows)]
-fn post(path: &str, body: &str, token: Option<&str>) {
-    match windows::post(path, body, token) {
-        Ok((status, _)) if (200..300).contains(&status) => {}
-        Ok((status, response)) => {
-            tracing::warn!(status, response = %response, "telemetry upload rejected")
-        }
-        Err(error) => tracing::warn!(error = %error, "telemetry upload failed; local report kept"),
-    }
+fn http_ok(status: u16) -> bool {
+    (200..300).contains(&status)
 }
 
-/// Shot index 1..=60 for elapsed times in `[0, 600)` seconds (one every 10 s).
+#[cfg(windows)]
+fn fatal_upload_status(status: u16) -> bool {
+    matches!(status, 400 | 401 | 403 | 404 | 413)
+}
+
+#[cfg(windows)]
+fn post_ok(path: &str, body: &str, token: Option<&str>, what: &str) -> bool {
+    for attempt in 1..=UPLOAD_ATTEMPTS {
+        match windows::post(path, body, token) {
+            Ok((status, _)) if http_ok(status) => return true,
+            Ok((status, response)) => {
+                tracing::warn!(
+                    status,
+                    response = %response,
+                    attempt,
+                    what,
+                    "telemetry upload rejected; local copy kept"
+                );
+                if fatal_upload_status(status) {
+                    return false;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    attempt,
+                    what,
+                    "telemetry upload failed; local copy kept"
+                );
+            }
+        }
+        if attempt < UPLOAD_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(350 * u64::from(attempt)));
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn post_jpeg_ok(path: &str, jpeg: &[u8], token: &str, what: &str) -> bool {
+    for attempt in 1..=UPLOAD_ATTEMPTS {
+        match windows::post_jpeg(path, jpeg, token) {
+            Ok((status, _)) if http_ok(status) => return true,
+            Ok((status, response)) => {
+                tracing::warn!(
+                    status,
+                    response = %response,
+                    attempt,
+                    what,
+                    "telemetry screenshot rejected; local copy kept"
+                );
+                if fatal_upload_status(status) {
+                    return false;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    attempt,
+                    what,
+                    "telemetry screenshot upload failed; local copy kept"
+                );
+            }
+        }
+        if attempt < UPLOAD_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(350 * u64::from(attempt)));
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn post_bytes_ok(path: &str, body: &[u8], content_type: &str, token: &str, what: &str) -> bool {
+    for attempt in 1..=UPLOAD_ATTEMPTS {
+        match windows::post_bytes(path, body, content_type, token) {
+            Ok((status, _)) if http_ok(status) => return true,
+            Ok((status, response)) => {
+                tracing::warn!(
+                    status,
+                    response = %response,
+                    attempt,
+                    what,
+                    "telemetry log rejected; local copy kept"
+                );
+                if fatal_upload_status(status) {
+                    return false;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    attempt,
+                    what,
+                    "telemetry log upload failed; local copy kept"
+                );
+            }
+        }
+        if attempt < UPLOAD_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(350 * u64::from(attempt)));
+        }
+    }
+    false
+}
+
+/// Shot index 1..=120 for elapsed times in `[0, 1200)` seconds (one every 10 s).
 fn screenshot_slot(elapsed: Duration) -> Option<u8> {
-    if elapsed >= Duration::from_secs(600) {
+    if elapsed >= SCREENSHOT_WINDOW {
         return None;
     }
-    u8::try_from(elapsed.as_secs() / 10 + 1).ok()
+    u8::try_from(elapsed.as_secs() / SCREENSHOT_INTERVAL_SECS + 1).ok()
+}
+
+fn shot_name(slot: u8) -> String {
+    format!("{slot:03}.jpg")
 }
 
 #[cfg(windows)]
@@ -219,6 +343,7 @@ fn maybe_capture_screenshot(
     token: Option<&str>,
     elapsed: Duration,
     next_slot: &mut u8,
+    pending: &mut Vec<(String, PathBuf)>,
 ) {
     let Some(slot) = screenshot_slot(elapsed) else {
         return;
@@ -230,7 +355,7 @@ fn maybe_capture_screenshot(
     let Some(jpeg) = windows::capture_game_jpeg() else {
         return;
     };
-    let name = format!("{slot:02}.jpg");
+    let name = shot_name(slot);
     let shots = dir.join(format!("screenshots-{run_id}"));
     let _ = std::fs::create_dir_all(&shots);
     let path = shots.join(&name);
@@ -238,16 +363,42 @@ fn maybe_capture_screenshot(
         return;
     }
     let Some(token) = token else {
+        pending.push((name, path));
         return;
     };
     let remote = format!("/vi/v1/runs/{run_id}/screenshots/{name}");
-    match windows::post_jpeg(&remote, &jpeg, token) {
-        Ok((status, _)) if (200..300).contains(&status) => {}
-        Ok((status, response)) => {
-            tracing::warn!(status, response = %response, shot = %name, "telemetry screenshot rejected")
+    if !post_jpeg_ok(&remote, &jpeg, token, &name) {
+        pending.push((name, path));
+    }
+}
+
+#[cfg(windows)]
+fn flush_pending_screenshots(
+    run_id: &str,
+    token: &str,
+    pending: &mut Vec<(String, PathBuf)>,
+    deadline: Instant,
+) {
+    let mut i = 0;
+    while i < pending.len() {
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                left = pending.len() - i,
+                "telemetry screenshot flush budget exhausted; remaining stay local"
+            );
+            break;
         }
-        Err(error) => {
-            tracing::warn!(error = %error, shot = %name, "telemetry screenshot upload failed; local copy kept")
+        let (name, path) = &pending[i];
+        let Ok(jpeg) = std::fs::read(path) else {
+            pending.remove(i);
+            continue;
+        };
+        let remote = format!("/vi/v1/runs/{run_id}/screenshots/{name}");
+        if post_jpeg_ok(&remote, &jpeg, token, name) {
+            pending.remove(i);
+        } else {
+            i += 1;
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 }
@@ -273,7 +424,7 @@ fn record(options: Options, stop: Receiver<()>) {
         }
         id
     });
-    let token = load_token(&dir, &machine_id);
+    let mut token = load_token(&dir, &machine_id);
     let id = run_id();
     let started = iso_utc();
     let specs = windows::specs();
@@ -345,8 +496,9 @@ fn record(options: Options, stop: Receiver<()>) {
         ("version", Json::string(env!("CARGO_PKG_VERSION"))),
         ("started_at", Json::string(&started)),
     ]);
-    if let Some(token) = &token {
-        post("/vi/v1/ping", &ping.to_string(), Some(token));
+    let mut pinged = false;
+    if let Some(tok) = token.as_deref() {
+        pinged = post_ok("/vi/v1/ping", &ping.to_string(), Some(tok), "ping");
     }
 
     let samples_path = dir.join(format!("samples-{id}.jsonl"));
@@ -363,21 +515,54 @@ fn record(options: Options, stop: Receiver<()>) {
     let mut cursor = metrics::Cursor::default();
     let began = Instant::now();
     let mut next_shot = 1u8;
+    let mut pending_shots: Vec<(String, PathBuf)> = Vec::new();
     let mut uploaded_logs = std::collections::BTreeSet::new();
-    maybe_capture_screenshot(&dir, &id, token.as_deref(), Duration::ZERO, &mut next_shot);
+    maybe_capture_screenshot(
+        &dir,
+        &id,
+        token.as_deref(),
+        Duration::ZERO,
+        &mut next_shot,
+        &mut pending_shots,
+    );
     let mut last_log_scan = Instant::now() - Duration::from_secs(30);
+    let mut last_token_retry = Instant::now();
     loop {
         match stop.recv_timeout(Duration::from_millis(100)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        maybe_capture_screenshot(&dir, &id, token.as_deref(), began.elapsed(), &mut next_shot);
+        if token.is_none() && last_token_retry.elapsed() >= Duration::from_secs(45) {
+            ensure_token(&dir, &machine_id, &mut token);
+            last_token_retry = Instant::now();
+            if !pinged
+                && let Some(tok) = token.as_deref()
+            {
+                pinged = post_ok("/vi/v1/ping", &ping.to_string(), Some(tok), "ping");
+            }
+        }
+        maybe_capture_screenshot(
+            &dir,
+            &id,
+            token.as_deref(),
+            began.elapsed(),
+            &mut next_shot,
+            &mut pending_shots,
+        );
         if last_log_scan.elapsed() >= Duration::from_secs(30) {
-            if let Some(token) = token.as_deref() {
+            if let Some(tok) = token.as_deref() {
+                if !pending_shots.is_empty() {
+                    flush_pending_screenshots(
+                        &id,
+                        tok,
+                        &mut pending_shots,
+                        Instant::now() + Duration::from_secs(4),
+                    );
+                }
                 upload_logs(
                     &dir,
                     &id,
-                    token,
+                    tok,
                     &options.log_roots,
                     began,
                     &mut uploaded_logs,
@@ -435,15 +620,56 @@ fn record(options: Options, stop: Receiver<()>) {
         ("events", Json::Arr(vec![])),
         ("summary", summary.to_json()),
     ]);
-    if let Some(token) = &token {
-        post("/vi/v1/ingest", &bundle.to_string(), Some(token));
+    ensure_token(&dir, &machine_id, &mut token);
+    let mut upload_notes = Vec::new();
+    if let Some(tok) = token.as_deref() {
+        if !pinged {
+            pinged = post_ok("/vi/v1/ping", &ping.to_string(), Some(tok), "ping");
+        }
+        if !pinged {
+            upload_notes.push("ping failed after retries".into());
+        }
+        if !post_ok("/vi/v1/ingest", &bundle.to_string(), Some(tok), "ingest") {
+            upload_notes.push("ingest failed after retries".into());
+        }
+        flush_pending_screenshots(
+            &id,
+            tok,
+            &mut pending_shots,
+            Instant::now() + Duration::from_secs(90),
+        );
+        if !pending_shots.is_empty() {
+            upload_notes.push(format!(
+                "{} screenshot(s) left local only",
+                pending_shots.len()
+            ));
+        }
         upload_logs(
             &dir,
             &id,
-            token,
+            tok,
             &options.log_roots,
             began,
             &mut uploaded_logs,
+        );
+    } else {
+        upload_notes.push("registration failed; reports stayed local".into());
+        if !pending_shots.is_empty() {
+            upload_notes.push(format!(
+                "{} screenshot(s) never uploaded",
+                pending_shots.len()
+            ));
+        }
+    }
+    if !upload_notes.is_empty() {
+        let _ = std::fs::write(
+            dir.join(format!("upload-status-{id}.txt")),
+            upload_notes.join("\n") + "\n",
+        );
+        tracing::warn!(
+            run = %id,
+            notes = %upload_notes.join("; "),
+            "telemetry upload incomplete; see upload-status file"
         );
     }
     tracing::info!(run = %id, samples = samples.len(), "telemetry report written to {}", dir.display());
@@ -469,7 +695,7 @@ fn upload_logs(
     let _ = std::fs::create_dir_all(&local);
     for (name, path) in files {
         let key = format!("{name}:{}", path.metadata().map(|m| m.len()).unwrap_or(0));
-        if !already.insert(key) {
+        if already.contains(&key) {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else {
@@ -482,14 +708,8 @@ fn upload_logs(
         } else {
             "text/plain; charset=utf-8"
         };
-        match windows::post_bytes(&remote, &bytes, content_type, token) {
-            Ok((status, _)) if (200..300).contains(&status) => {}
-            Ok((status, response)) => {
-                tracing::warn!(status, response = %response, log = %name, "telemetry log rejected")
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, log = %name, "telemetry log upload failed; local copy kept")
-            }
+        if post_bytes_ok(&remote, &bytes, content_type, token, &name) {
+            already.insert(key);
         }
     }
 }
@@ -523,11 +743,15 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_slots_cover_first_ten_minutes() {
+    fn screenshot_slots_cover_first_twenty_minutes() {
         assert_eq!(screenshot_slot(Duration::from_secs(0)), Some(1));
         assert_eq!(screenshot_slot(Duration::from_secs(9)), Some(1));
         assert_eq!(screenshot_slot(Duration::from_secs(10)), Some(2));
         assert_eq!(screenshot_slot(Duration::from_secs(599)), Some(60));
-        assert_eq!(screenshot_slot(Duration::from_secs(600)), None);
+        assert_eq!(screenshot_slot(Duration::from_secs(600)), Some(61));
+        assert_eq!(screenshot_slot(Duration::from_secs(1199)), Some(120));
+        assert_eq!(screenshot_slot(Duration::from_secs(1200)), None);
+        assert_eq!(shot_name(1), "001.jpg");
+        assert_eq!(shot_name(120), "120.jpg");
     }
 }

@@ -4,8 +4,9 @@
 `victory run --execute`. It is **on by default** so frame-rate regressions can
 be compared between builds and machines. Reports go to
 `https://rxnd.de/vi/v1`; local files are written before upload, so a network
-failure leaves the recorded data available locally. Uploads are not retried
-automatically. Network timeouts can delay recorder shutdown.
+failure leaves the recorded data available locally. Transient failures are
+retried a few times during the run and again briefly at exit; anything still
+pending stays on disk (`upload-status-<run_id>.txt` notes incomplete uploads).
 
 ## Opting out
 
@@ -64,14 +65,15 @@ stalls. They should not be compared with frame-level benchmark results.
 
 ### Screenshots
 
-For the first ten minutes of a run the recorder also captures the **foreground
-game window** every ten seconds (up to 60 frames, named `01.jpg` … `60.jpg`).
-Each frame is downscaled to at most 480 px on the long edge and encoded as a
-low-quality JPEG, then uploaded to
-`POST /vi/v1/runs/<id>/screenshots/<nn>.jpg`. Capture is skipped when the
-foreground window is not this process, when Windows cannot provide pixels, or
-when the bitmap is effectively blank (common for some exclusive-fullscreen
-paths). Local copies stay under `screenshots-<run_id>/`.
+For the first twenty minutes of a run the recorder also captures the
+**foreground game window** every ten seconds (up to 120 frames, named
+`001.jpg` … `120.jpg`). Each frame is downscaled to at most 480 px on the long
+edge and encoded as a low-quality JPEG, then uploaded to
+`POST /vi/v1/runs/<id>/screenshots/<nnn>.jpg`. Failed uploads are retried during
+the run and again for up to ~90s at exit; anything still pending stays local.
+Capture is skipped when the foreground window is not this process, when Windows
+cannot provide pixels, or when the bitmap is effectively blank (common for some
+exclusive-fullscreen paths). Local copies stay under `screenshots-<run_id>/`.
 
 ### Crash and game logs
 
@@ -119,8 +121,11 @@ contains:
 - `machine_id` — the installation ID associated with that token;
 - `manifest-<run_id>.json`, `samples-<run_id>.jsonl`, `summary-<run_id>.json`
   — one set per run, kept even when the upload fails;
-- `screenshots-<run_id>/NN.jpg` — local copies of the bounded game-window
-  captures for that run.
+- `screenshots-<run_id>/NNN.jpg` — local copies of the bounded game-window
+  captures for that run;
+- `logs-<run_id>/` — local copies of uploaded crash/game logs;
+- `upload-status-<run_id>.txt` — present when registration or final uploads
+  did not fully succeed.
 
 ## Server
 
@@ -129,7 +134,8 @@ service. SQLite is the API's source of truth (`installations`, `runs`,
 `samples`, `events`, `heartbeats`); the same data is also kept as JSONL plus a
 git archive of runs. There is currently no retention limit. Uploads use
 WinHTTP through the Windows system trust store, with short connect and send
-timeouts; a failed upload only writes a warning to the log.
+timeouts; failed attempts are retried with backoff and otherwise leave local
+copies plus a warning in the log.
 
 Admin endpoints (require the server's admin token) include
 `GET /vi/v1/users`, `GET /vi/v1/runs?git_sha=<sha>`, `GET /vi/v1/stats` and
