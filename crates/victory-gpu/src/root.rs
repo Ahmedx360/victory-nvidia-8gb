@@ -47,7 +47,7 @@ fn report_agility_redist_error(hr: HRESULT) {
         hresult = format_args!("{:#010x}", hr as u32),
         requested_sdk = 620,
         runtime_dir,
-        "D3D12 rejected the Agility SDK runtime (missing or mismatched D3D12Core.dll); install Microsoft.Direct3D.D3D12 1.620.2 x64 into this directory"
+        "D3D12 rejected the Agility SDK runtime (missing or mismatched D3D12Core.dll); rebuild victory so build.rs installs Microsoft.Direct3D.D3D12 1.620.2 under .\\D3D12\\ next to the exe"
     );
 }
 
