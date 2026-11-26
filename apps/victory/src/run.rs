@@ -18,6 +18,7 @@ pub fn run(
 
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
+    fast_defaults();
     if execute {
         // Before the host's own memory (the image read below, the GPU
         // device, the caches) takes the space the title's 32-bit memory needs.
@@ -458,4 +459,47 @@ fn from_hex(s: &str) -> Result<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(anyhow::Error::from))
         .collect()
+}
+
+/// The switches measured fastest in the world (per-frame time from about
+/// 1,100 ms to about 150 ms), set unless the environment sets them already:
+/// `VICTORY_FAST_DEFAULTS=0` leaves every switch at the layer's own
+/// default. Each is described where it is read.
+#[cfg(windows)]
+fn fast_defaults() {
+    if std::env::var_os("VICTORY_FAST_DEFAULTS").is_some_and(|v| v == "0") {
+        return;
+    }
+    const FAST: &[(&str, &str)] = &[
+        ("VICTORY_LATE_WAIT", "3"),
+        ("VICTORY_RELAY", "2"),
+        ("VICTORY_WIDE_BACK", "1"),
+        ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
+        ("VICTORY_CARD_BUFFERS_MB", "1024"),
+        ("VICTORY_TEXTURE_NO_WAIT", "1"),
+        ("VICTORY_INDIRECT_CPU", "1"),
+        ("VICTORY_INDIRECT_WINDOW", "1"),
+        ("VICTORY_REFRESH_STAMP", "1"),
+        ("VICTORY_FAULT_TRACK", "1"),
+        ("VICTORY_LAZY_BACK", "1"),
+        ("VICTORY_BACK_ON_DEMAND", "1"),
+        ("VICTORY_GPU_BACK_MAX_KB", "1024"),
+        ("VICTORY_LATE_WAIT_LISTS", "512"),
+        ("VICTORY_ASYNC_SUBMIT", "1"),
+        ("VICTORY_ASYNC_PRESENT", "1"),
+        ("VICTORY_MERGE_RUNS", "65536"),
+        ("VICTORY_QUEUE2", "1"),
+        ("VICTORY_FILL_NO_WAIT", "1"),
+        ("VICTORY_REUSE_IDLE", "1"),
+        ("VICTORY_VIEW_KNOWN", "1"),
+        ("VICTORY_CLAMP_SCOPED", "1"),
+        ("VICTORY_BARRIER_MERGE", "1"),
+    ];
+    for (name, value) in FAST {
+        if std::env::var_os(name).is_none() {
+            // SAFETY: at start-up, before any thread of ours or the
+            // title's reads the environment.
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
 }
