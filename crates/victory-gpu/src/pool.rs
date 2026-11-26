@@ -90,6 +90,12 @@ fn staging_spare_cap() -> usize {
     *CAP.get_or_init(|| blocks_for(std::env::var("VICTORY_STAGING_POOL_MB").ok().as_deref()))
 }
 
+/// Render-target heap blocks have a fixed spare cap; unlike upload and
+/// texture pools, they do not use a separate environment-variable setting.
+fn target_spare_cap() -> usize {
+    SPARE
+}
+
 /// Blocks for a setting in MiB; no cap without one.
 fn blocks_for(setting: Option<&str>) -> usize {
     setting
@@ -404,7 +410,7 @@ unsafe impl Send for Upload {}
 
 static TEXTURES: Mutex<Pool<ID3D12Heap>> = Mutex::new(Pool::capped(SPARE_KEPT, texture_spare_cap));
 /// Render targets use a distinct D3D12 heap class from uploadable textures.
-static TARGETS: Mutex<Pool<ID3D12Heap>> = Mutex::new(Pool::new(SPARE));
+static TARGETS: Mutex<Pool<ID3D12Heap>> = Mutex::new(Pool::capped(SPARE, target_spare_cap));
 static STAGING: Mutex<Pool<Upload>> = Mutex::new(Pool::capped(STAGING_KEPT, staging_spare_cap));
 static TARGET_ALIASES: std::sync::LazyLock<Mutex<std::collections::HashMap<usize, bool>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
