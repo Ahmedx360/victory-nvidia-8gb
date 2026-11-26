@@ -1388,6 +1388,9 @@ mod tests {
             ..Default::default()
         }];
         let title = g.blend;
+        // The integer target does not blend in the title's pipeline.
+        assert!(g.integer_targets_do_not_blend());
+        assert!(!g.blend.RenderTarget[1].BlendEnable.as_bool());
 
         // Float colour in both slots, no depth view bound: both blend, as
         // the title said; the depth format stays the title's.
