@@ -642,6 +642,7 @@ dependencies = [
  "blake3",
  "clap",
  "memchr",
+ "tracing",
  "victory-core",
  "victory-game",
  "victory-hle",
@@ -759,6 +760,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "jpeg-encoder",
+ "tempfile",
  "tracing",
  "windows",
  "windows-sys",

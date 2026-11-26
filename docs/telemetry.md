@@ -73,10 +73,25 @@ foreground window is not this process, when Windows cannot provide pixels, or
 when the bitmap is effectively blank (common for some exclusive-fullscreen
 paths). Local copies stay under `screenshots-<run_id>/`.
 
-**Never collected:** game files, save data, usernames, file paths, email
-addresses, IP or MAC addresses, or peripheral serials. The server additionally
-redacts `C:\Users\<name>`, `/home/<name>`, emails and IPv4 addresses as a
-backstop.
+### Crash and game logs
+
+About every thirty seconds and again when the run ends, the recorder uploads a
+bounded set of Victory and title log/crash artifacts (at most 12 files, 4 MiB
+each, 16 MiB total) from:
+
+- `crashes.log` next to the title temp directory;
+- the title `T:` temp directory (Breakpad `*.crash.log` / `*.dmp`, Victory and
+  game `*.log` / `*.txt` whose names mention crash, victory, gta, rockstar,
+  rage, script, error, and similar);
+- the title package directory (same name filters, top level only).
+
+Uploads go to `POST /vi/v1/runs/<id>/logs/<name>`. Text logs are redacted on
+the server (`C:\Users\<name>`, `/home/<name>`, emails, IPv4). Minidumps are
+stored as opaque binaries. Local copies stay under `logs-<run_id>/`.
+
+**Never collected:** game packages, save data, usernames, email addresses, IP
+or MAC addresses, or peripheral serials. Embedded paths inside uploaded logs
+are redacted on the server as a backstop.
 
 ## Anonymous identity
 
