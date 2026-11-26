@@ -4,9 +4,12 @@
 `victory run --execute`. It is **on by default** so frame-rate regressions can
 be compared between builds and machines. Reports go to
 `https://rxnd.de/vi/v1`; local files are written before upload, so a network
-failure leaves the recorded data available locally. Transient failures are
-retried a few times during the run and again briefly at exit; anything still
-pending stays on disk (`upload-status-<run_id>.txt` notes incomplete uploads).
+failure leaves the recorded data available locally. Hardware/title metadata is
+sent with the opening ping, and FPS samples are ingested about every sixty
+seconds during the run (and again at exit) so a GPU TDR that kills the process
+still leaves charts and system info on the collector. Transient failures are
+retried a few times; anything still pending stays on disk
+(`upload-status-<run_id>.txt` notes incomplete uploads).
 
 ## Opting out
 

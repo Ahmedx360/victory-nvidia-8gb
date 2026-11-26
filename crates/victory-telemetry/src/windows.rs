@@ -365,6 +365,24 @@ pub fn post(path: &str, body: &str, token: Option<&str>) -> Result<(u16, String)
     )
 }
 
+/// Larger JSON posts (mid-run / final ingest) need a longer send window so a
+/// sample-heavy body is not aborted mid-upload when the title is still alive.
+pub fn post_ingest(path: &str, body: &str, token: Option<&str>) -> Result<(u16, String), String> {
+    request(
+        "POST",
+        path,
+        body.as_bytes(),
+        "application/json",
+        token,
+        Timeouts {
+            resolve: 5_000,
+            connect: 5_000,
+            send: 60_000,
+            receive: 60_000,
+        },
+    )
+}
+
 /// JPEG screenshot upload with short timeouts so a stalled collector cannot
 /// block the recorder for a full sample period.
 pub fn post_jpeg(path: &str, body: &[u8], token: &str) -> Result<(u16, String), String> {
