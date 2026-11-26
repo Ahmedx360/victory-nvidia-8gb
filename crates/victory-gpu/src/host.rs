@@ -462,6 +462,7 @@ fn sweep() {
     if crate::residency::trim_idle() {
         crate::list::trim_idle();
         crate::shadow::trim_snapshots();
+        crate::shadow::trim_view_copies();
     }
     crate::pool::room(host().and_then(|h| h.video_memory()));
     crate::pipeline::trim_library();
@@ -1872,6 +1873,17 @@ const SPARE_MOST: u64 = 128 << 20;
 /// The same with [`keep_freed`].
 const SPARE_KEPT: u64 = 1 << 30;
 
+/// A lower limit for either of those: `VICTORY_SCRATCH_SPARE_MB`.
+fn scratch_spare_cap() -> u64 {
+    static CAP: OnceLock<u64> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("VICTORY_SCRATCH_SPARE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(u64::MAX, |mb| mb.saturating_mul(1 << 20))
+    })
+}
+
 /// Whether lists share their scratch chunks: a list takes a chunk when it
 /// first needs one, a small one first, and gives all of them back when it
 /// is reset or dropped, for the next list. Before, a list kept every chunk
@@ -1955,7 +1967,8 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
                     SPARE_KEPT
                 } else {
                     SPARE_MOST
-                };
+                }
+                .min(scratch_spare_cap());
                 spare.give(chunk, size, limit)
             } else {
                 Some(chunk)
