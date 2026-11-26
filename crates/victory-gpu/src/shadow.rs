@@ -1259,6 +1259,11 @@ mod relay_tests {
 /// Snapshot memory kept for reuse (already touched, so no page faults).
 static POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
+pub(crate) fn trim_snapshots() {
+    let freed = std::mem::take(&mut *POOL.lock().unwrap_or_else(|e| e.into_inner()));
+    drop(freed);
+}
+
 /// An empty buffer with room for `n` bytes, from the pool if it has one
 /// of about that size: a small copy's snapshot took the 174 MB buffer kept
 /// for the big heap's, which then got another, until eight of them were
@@ -4785,7 +4790,11 @@ thread_local! {
 
 /// Whether [`FOUND`] is kept (`VICTORY_QUICK_FIND=0`: not).
 fn quick_find() -> bool {
-    crate::toggled!("VICTORY_QUICK_FIND")
+    static LEGACY_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*LEGACY_OFF.get_or_init(|| {
+        std::env::var_os("VICTORY_QUICK_FIND").is_none()
+            && std::env::var_os("VICTORY_LOOKUP_CACHE").is_some_and(|v| v == "0")
+    }) && crate::toggled!("VICTORY_QUICK_FIND")
 }
 
 fn found_at(address: u64, len: u64) -> usize {

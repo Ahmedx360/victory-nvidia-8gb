@@ -6,6 +6,24 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 static PRESSURED: AtomicBool = AtomicBool::new(false);
+static TRIM_IDLE: AtomicBool = AtomicBool::new(false);
+
+/// Legacy opt-in threshold for releasing spare storage sooner. The stock
+/// pressure policy still protects allocations and controls upload admission.
+pub(crate) fn trim_idle() -> bool {
+    TRIM_IDLE.load(Ordering::Relaxed)
+}
+
+fn trim_threshold() -> Option<u64> {
+    static LIMIT: OnceLock<Option<u64>> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_RAM_TRIM_MB")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&mb| mb != 0)
+            .and_then(|mb| mb.checked_mul(MIB))
+    })
+}
 static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn memory_status() -> Option<MEMORYSTATUSEX> {
@@ -108,6 +126,7 @@ pub(crate) fn refresh() {
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
+    TRIM_IDLE.store(trim_threshold().is_some_and(|limit| physical < limit), Ordering::Relaxed);
     let was = pressured();
     let pressure = next_pressure(was, physical, commit);
     if pressure != was {
