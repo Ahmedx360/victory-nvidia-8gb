@@ -42,6 +42,7 @@ pub fn run(
     strict: bool,
     execute: bool,
     console: Console,
+    no_telemetry: bool,
 ) -> Result<()> {
     use std::sync::Arc;
     use victory_hle::{HleResolver, HostPolicy};
@@ -208,11 +209,26 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
+    // The recorder starts just before title code and writes the local report
+    // when it is joined, even if the title panics. It never fails the launch.
+    let mut telemetry = if no_telemetry || !cfg.telemetry_enabled {
+        None
+    } else {
+        let dir = cfg.data_subdir("telemetry")?;
+        victory_telemetry::start(victory_telemetry::Options {
+            dir,
+            title_hash: hash.to_string(),
+            console: victory_hle::console::current().name().to_owned(),
+            disabled: false,
+        })
+    };
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
-    let code = main
-        .join()
-        .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
+    let joined = main.join();
+    if let Some(telemetry) = &mut telemetry {
+        telemetry.finish();
+    }
+    let code = joined.map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
     Ok(())
 }
@@ -549,6 +565,6 @@ mod cpu_check_tests {
 }
 
 #[cfg(not(windows))]
-pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<()> {
+pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console, _: bool) -> Result<()> {
     anyhow::bail!("running titles requires Windows")
 }

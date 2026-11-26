@@ -642,6 +642,7 @@ dependencies = [
  "victory-loader",
  "victory-pe",
  "victory-shader",
+ "victory-telemetry",
  "walkdir",
 ]
 
@@ -680,6 +681,7 @@ dependencies = [
  "victory-formats",
  "victory-pipeline",
  "victory-shader",
+ "victory-telemetry",
  "windows",
  "windows-sys",
  "zlib-rs",
@@ -743,6 +745,16 @@ dependencies = [
  "windows",
  "windows-sys",
  "zlib-rs",
+]
+
+[[package]]
+name = "victory-telemetry"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "tracing",
+ "windows",
+ "windows-sys",
 ]
 
 [[package]]
