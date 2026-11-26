@@ -2111,7 +2111,7 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         None => {
             let speculative = PICKING.get().is_some() && !BAKING.get();
             let shared = host.video_memory_groups().map(|[_, shared]| shared);
-            if !crate::budget::admit_pool_growth(shared, total)
+            if !crate::budget::admit_staging_allocation(shared, total)
                 || crate::residency::upload_refused()
                 || (speculative && !crate::residency::allow_staging_growth(false))
             {

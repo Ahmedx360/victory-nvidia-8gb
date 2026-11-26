@@ -42,9 +42,23 @@ pub(crate) fn admit_pool_growth(memory: Option<[u64; 4]>, allocation: u64) -> bo
     }
 }
 
+/// Dedicated uploads have no smaller fallback. When budget information is
+/// unavailable, let the existing residency policy decide whether to allocate.
+pub(crate) fn admit_staging_allocation(memory: Option<[u64; 4]>, allocation: u64) -> bool {
+    memory.is_none() || admit_pool_growth(memory, allocation)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Pressure, admit_pool_growth, admit_textures, pressure};
+    use super::{Pressure, admit_pool_growth, admit_staging_allocation, admit_textures, pressure};
+
+    #[test]
+    fn dedicated_large_upload_can_fall_back_when_budget_is_unknown() {
+        let large = 128 << 20;
+        assert!(!admit_pool_growth(None, large));
+        assert!(admit_staging_allocation(None, large));
+        assert!(!admit_staging_allocation(Some([1 << 30, 1 << 30, 0, 0]), large));
+    }
 
     #[test]
     fn adapter_pressure_is_shared_across_texture_and_pool_admission() {
