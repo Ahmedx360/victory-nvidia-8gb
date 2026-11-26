@@ -5,14 +5,14 @@
 //! which every translated pipeline uses. D3D12 looks for these two exports on
 //! the process's executable; when they name a runtime newer than the
 //! system's, it loads `D3D12Core.dll` from `D3D12SDKPath` (relative to the
-//! executable) instead. `cargo xtask agility` puts it there. Without the
+//! executable) instead. Place the matching DLL there when required. Without the
 //! folder, or on a system whose runtime is newer, the in-box one is used.
 //!
 //! `build.rs` exports both symbols.
 #![allow(non_upper_case_globals)]
 
 /// The runtime's SDK version: the minor number of the
-/// `Microsoft.Direct3D.D3D12` package `cargo xtask agility` fetches
+/// `Microsoft.Direct3D.D3D12` package used by this fork
 /// (1.620.2). Keep the two in step.
 #[unsafe(no_mangle)]
 pub static D3D12SDKVersion: u32 = 620;

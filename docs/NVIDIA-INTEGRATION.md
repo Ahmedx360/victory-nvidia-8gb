@@ -1,0 +1,46 @@
+# cool_fox integration for NVIDIA 8 GB
+
+The integration starts from the complete [cool_fox tree at f4b48ad](https://github.com/DoubleGhosty/cool_fox/tree/f4b48ad766ddbec1a1867022cd42f7645b0dd55e).
+The NVIDIA baseline is [150ba23](https://github.com/ad3lre/victory-nvidia-8gb/tree/150ba23379dddc934df31992eba7989dace0e8d2).
+There were 186 NVIDIA-side and 395 cool_fox-side commits since their common
+ancestor. A trial merge conflicted in 32 files, including submission,
+descriptor, shader, resource, and memory-watch code.
+
+| Work | What the cool_fox code changes |
+| --- | --- |
+| CPU submission | It defers descriptor-table work until draws need it, spreads refreshes and command-list translation across threads, and batches submission parts and indirect work. |
+| Shared-memory emulation | It narrows write-watch and copy-back work, uses card-side hashing and parallel AVX2 comparisons, and copies shader-written textures back to title memory for CPU consumers. |
+| Memory pressure | It reserves room for render targets, scopes bindless refreshes to the selected heap, bounds speculative staging, and backs off failed pool growth or uploads when system commit is low. |
+| Compatibility | It includes the Series S two-plane present fix, NVIDIA Wave32 shader lowering, movie-plane upload fixes, and XMA audio fixes. |
+
+The [RX 7900 XTX measurements](https://github.com/DoubleGhosty/cool_fox/blob/f4b48ad766ddbec1a1867022cd42f7645b0dd55e/docs/findings.md)
+attribute the largest early CPU improvement to deferring draw-table
+descriptor records (280 ms to about 124 ms). Later measurements dropped
+from 103 to 75 ms after moving preparation work to a separate thread and
+parallelizing refreshes. Upstream reports 13–20 FPS indoors on Series X
+at 1440p. The [NVIDIA baseline](https://github.com/ad3lre/victory-nvidia-8gb/blob/150ba23379dddc934df31992eba7989dace0e8d2/README.md)
+reports 8–10 FPS on an RTX 4060 Laptop at 1080p in Series X with two
+mips dropped. The RTX-oriented pareto launcher defaults to Series S.
+These are different GPUs, workloads, and configurations.
+
+The integration retains thin LTO, the optional resolution cap and
+borderless workaround, Agility SDK 620 exports, and the optional
+`VICTORY_VRAM_IDLE_MS` override. It uses cool_fox's residency and
+mip-on-demand paths. Fork-specific features still absent include forced mip
+dropping (`VICTORY_TEXTURE_DROP_MIPS`), the F10 overlay, the divergent
+cross-half shader experiment, and GPU optimizations and test changes that
+differ from the cool_fox implementations. Forced mip dropping needs its
+own port and runtime test because it changes host subresource indices and
+the upload, copy, read-back, and tiled-texture paths all use those indices.
+
+## Windows comparison
+
+Use the same title build, checkpoint, driver, and capture method for each
+run. Warm the pipeline cache for each build separately. Start with Series X
+and 1080p on both builds at equivalent texture settings (forced mip
+dropping disabled on the baseline). Then compare the old tuned baseline
+(two mips dropped) against the new Series X and pareto Series S profiles
+as separate runs. Record median and 95th-percentile frame time, peak VRAM
+and private commit, visible texture and lighting differences, and time
+spent streaming. Repeat the first boat mission and the Series S transition
+from movies to gameplay to check the read-back and two-plane fixes.
