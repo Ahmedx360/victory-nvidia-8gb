@@ -142,7 +142,7 @@ pub fn specs() -> Specs {
     memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
     // SAFETY: the length field matches the allocation.
     unsafe { GlobalMemoryStatusEx(&mut memory) };
-    result.ram_total_mb = (memory.ullTotalPhys / MB as u64 / 1024) as u64;
+    result.ram_total_mb = memory.ullTotalPhys / MB as u64;
 
     if let Ok(gpu) = gpu_description() {
         result.gpu_name = gpu.0;
@@ -176,37 +176,7 @@ fn gpu_description() -> Result<(String, u64), ()> {
 fn driver_version() -> String {
     const KEY: &str =
         r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000";
-    let key = wide(KEY);
-    let name = wide("DriverVersion");
-    let mut handle: HKEY = std::ptr::null_mut();
-    // SAFETY: key and name are NUL-terminated; handle is an out-parameter.
-    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.as_ptr(), 0, KEY_READ, &mut handle) } != 0 {
-        return String::new();
-    }
-    let mut bytes = [0u8; 8];
-    let mut size = bytes.len() as u32;
-    // SAFETY: size matches the buffer.
-    let rc = unsafe {
-        RegGetValueW(
-            handle,
-            std::ptr::null(),
-            name.as_ptr(),
-            RRF_RT_REG_BINARY,
-            std::ptr::null_mut(),
-            bytes.as_mut_ptr().cast(),
-            &mut size,
-        )
-    };
-    // SAFETY: the handle came from the successful open above.
-    unsafe { RegCloseKey(handle) };
-    if rc != 0 || size < 8 {
-        return String::new();
-    }
-    format!(
-        "{:08x}{:08x}",
-        u32::from_le_bytes(bytes[..4].try_into().unwrap()),
-        u32::from_le_bytes(bytes[4..].try_into().unwrap())
-    )
+    registry_string(HKEY_LOCAL_MACHINE, KEY, "DriverVersion").unwrap_or_default()
 }
 
 struct CpuTimes(u64, u64);
@@ -373,9 +343,26 @@ pub fn display() -> (u32, u32) {
 /// HTTPS POST through WinHTTP with the system trust store. Returns the status
 /// code and body; network failures are returned as text, never panics.
 pub fn post(path: &str, body: &str, token: Option<&str>) -> Result<(u16, String), String> {
+    request("POST", path, body, token)
+}
+
+pub fn token_machine_id(token: &str) -> Option<String> {
+    let (status, body) = request("GET", "/vi/v1/stats", "", Some(token)).ok()?;
+    if status != 200 {
+        return None;
+    }
+    find_string(&body, "machine_id")
+}
+
+fn request(
+    method: &str,
+    path: &str,
+    body: &str,
+    token: Option<&str>,
+) -> Result<(u16, String), String> {
     let agent = wide("adel-VIctory-telemetry/1.0");
     let host = wide("rxnd.de");
-    let verb = wide("POST");
+    let verb = wide(method);
     let resource = wide(path);
     let mut headers = String::from("Content-Type: application/json\r\n");
     if let Some(token) = token {

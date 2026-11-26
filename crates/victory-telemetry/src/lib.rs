@@ -129,8 +129,8 @@ fn iso_utc() -> String {
 
 fn run_id() -> String {
     let stamp = iso_utc().replace(['-', ':', 'T', 'Z'], "");
-    let salt = format!("{}:{}", unix_seconds(), std::process::id());
-    let suffix = &blake3::hash(salt.as_bytes()).to_hex()[..4];
+    let salt = format!("{:?}:{}", SystemTime::now(), std::process::id());
+    let suffix = &blake3::hash(salt.as_bytes()).to_hex()[..16];
     format!("{stamp}-{suffix}")
 }
 
@@ -198,7 +198,23 @@ fn post(path: &str, body: &str, token: Option<&str>) {
 fn record(options: Options, stop: Receiver<()>) {
     let dir = options.dir;
     notice(&dir);
-    let machine_id = windows::machine_id();
+    // Older installs derived this ID from CPUID, which can vary with the
+    // CPU running the thread. Recover the ID bound to an existing token.
+    let identity_path = dir.join("machine_id");
+    let saved = std::fs::read_to_string(&identity_path)
+        .ok()
+        .filter(|id| (16..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit()));
+    let machine_id = saved.unwrap_or_else(|| {
+        let token = std::fs::read_to_string(dir.join("token")).ok();
+        let recovered = token
+            .as_deref()
+            .and_then(|t| windows::token_machine_id(t.trim()));
+        let id = recovered.clone().unwrap_or_else(windows::machine_id);
+        if token.is_none() || recovered.is_some() {
+            let _ = std::fs::write(&identity_path, &id);
+        }
+        id
+    });
     let token = load_token(&dir, &machine_id);
     let id = run_id();
     let started = iso_utc();
@@ -318,7 +334,7 @@ fn record(options: Options, stop: Receiver<()>) {
             );
             samples.push(sample);
         }
-        if samples.len() % 5 == 4 {
+        if !samples.is_empty() && samples.len().is_multiple_of(5) {
             let _ = std::io::Write::flush(&mut writer);
         }
     }
