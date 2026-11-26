@@ -25,6 +25,7 @@ fn trim_threshold() -> Option<u64> {
     })
 }
 static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
+static PHYSICAL: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn memory_status() -> Option<MEMORYSTATUSEX> {
     // SAFETY: the API initializes the fields of a correctly sized structure.
@@ -122,10 +123,12 @@ fn next_trim(was: bool, physical: u64, limit: u64) -> bool {
 }
 
 fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
+    // Enter earlier than the old 3/4 GiB cliff so prefetch and in-flight caps
+    // tighten before submit prep starts thrashing (TDR risk around ~3 GiB free).
     if was {
-        physical < 5 * GIB || commit < 6 * GIB
+        physical < 6 * GIB || commit < 7 * GIB
     } else {
-        physical <= 3 * GIB || commit <= 4 * GIB
+        physical <= 4 * GIB || commit <= 5 * GIB
     }
 }
 
@@ -133,6 +136,7 @@ fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
 pub(crate) fn refresh() {
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
+    PHYSICAL.store(physical, Ordering::Relaxed);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
     let trimming = TRIM_IDLE.load(Ordering::Relaxed);
     TRIM_IDLE.store(trim_threshold().is_some_and(|limit| next_trim(trimming, physical, limit)), Ordering::Relaxed);
@@ -163,6 +167,11 @@ pub(crate) fn headroom() -> Option<u64> {
     (bytes != u64::MAX).then_some(bytes)
 }
 
+pub(crate) fn physical_free() -> Option<u64> {
+    let bytes = PHYSICAL.load(Ordering::Relaxed);
+    (bytes != u64::MAX).then_some(bytes)
+}
+
 pub(crate) fn pressured() -> bool {
     PRESSURED.load(Ordering::Relaxed)
 }
@@ -174,13 +183,20 @@ pub(crate) fn critical_commit() -> bool {
     now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) || sample_commit(now) < 1536 * MIB
 }
 
+/// Emergency host-memory state: commit cliff or physical free under 2.5 GiB.
+/// Caps in-flight work and pauses speculative uploads so submit prep cannot
+/// sit for multi-second spans that trip NVIDIA TDR.
+pub(crate) fn critical() -> bool {
+    critical_commit() || physical_free().is_some_and(|physical| physical < 2560 * MIB)
+}
+
 /// A soft per-frame admission limit. A single texture can cross it. The
 /// queue retains unserved slots so they can be retried on later frames.
 pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
     if critical {
-        bytes.min(16 << 20)
+        bytes.min(8 << 20)
     } else if pressure || (limited && staging >= GIB) {
-        bytes.min(64 << 20)
+        bytes.min(32 << 20)
     } else {
         bytes
     }
@@ -221,23 +237,23 @@ mod tests {
 
     #[test]
     fn either_constraint_enters_pressure_and_both_must_recover() {
-        assert!(next_pressure(false, 12 * GIB, 4 * GIB));
-        assert!(next_pressure(false, 3 * GIB, 16 * GIB));
-        assert!(next_pressure(true, 4 * GIB, 7 * GIB));
-        assert!(next_pressure(true, 6 * GIB, 5 * GIB));
-        assert!(!next_pressure(true, 5 * GIB, 6 * GIB));
-        assert!(!next_pressure(false, 4 * GIB, 5 * GIB));
+        assert!(next_pressure(false, 12 * GIB, 5 * GIB));
+        assert!(next_pressure(false, 4 * GIB, 16 * GIB));
+        assert!(next_pressure(true, 5 * GIB, 8 * GIB));
+        assert!(next_pressure(true, 7 * GIB, 6 * GIB));
+        assert!(!next_pressure(true, 6 * GIB, 7 * GIB));
+        assert!(!next_pressure(false, 5 * GIB, 6 * GIB));
     }
 
     #[test]
     fn prefetch_respects_existing_budgets_and_resumes_after_recovery() {
-        assert_eq!(prefetch_limit(512 << 20, false, false, true, GIB), 64 << 20);
+        assert_eq!(prefetch_limit(512 << 20, false, false, true, GIB), 32 << 20);
         assert_eq!(prefetch_limit(512 << 20, false, false, true, GIB - 1), 512 << 20);
         assert_eq!(prefetch_limit(512 << 20, false, false, false, 2 * GIB), 512 << 20);
         assert_eq!(prefetch_limit(0, true, true, false, 0), 0);
         assert_eq!(prefetch_limit(8 << 20, true, true, false, 0), 8 << 20);
-        assert_eq!(prefetch_limit(512 << 20, true, false, false, 0), 64 << 20);
-        assert_eq!(prefetch_limit(512 << 20, true, true, false, 0), 16 << 20);
+        assert_eq!(prefetch_limit(512 << 20, true, false, false, 0), 32 << 20);
+        assert_eq!(prefetch_limit(512 << 20, true, true, false, 0), 8 << 20);
         assert_eq!(prefetch_limit(192 << 20, false, false, false, 0), 192 << 20);
     }
 }

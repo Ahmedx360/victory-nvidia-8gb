@@ -575,7 +575,7 @@ pub(crate) fn let_go_idle() {
     // commit pressure, drop entries owned only by the cache now; the next
     // sample will re-detile them. In-flight lists retain their Arc and GPU
     // upload source until the existing list/fence path releases it.
-    let memory_pressure = crate::residency::pressured() || crate::residency::critical_commit();
+    let memory_pressure = crate::residency::pressured() || crate::residency::critical();
     let cache_budget = staging_cache_budget(memory_pressure);
     let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
     let Some(map) = map.as_mut() else {

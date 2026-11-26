@@ -55,7 +55,7 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
         pool.reclaim(tick, limit, true);
     }
     if let Ok(mut pool) = TARGETS.try_lock() {
-        let target_spares = if crate::residency::critical_commit() {
+        let target_spares = if crate::residency::critical() {
             0
         } else if pressure {
             1
@@ -65,7 +65,7 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
         pool.reclaim(tick, target_spares, true);
     }
     if let Ok(mut pool) = STAGING.try_lock() {
-        let staging_limit = if crate::residency::critical_commit() {
+        let staging_limit = if crate::residency::critical() {
             0
         } else if pressure {
             1

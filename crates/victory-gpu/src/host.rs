@@ -467,7 +467,13 @@ fn sweep() {
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = now_ms();
     let last = LAST.load(Ordering::Relaxed);
-    let cadence = if crate::residency::trim_idle() { 500 } else { 1_000 };
+    let cadence = if crate::residency::critical() {
+        250
+    } else if crate::residency::pressured() || crate::residency::trim_idle() {
+        500
+    } else {
+        1_000
+    };
     if now < last + cadence
         || LAST
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
@@ -487,7 +493,12 @@ fn sweep() {
         crate::shadow::trim_view_copies();
     }
     crate::pool::room(host().and_then(|h| h.video_memory()));
-    crate::pipeline::trim_library();
+    // Unlocking the pipeline library under pressure forces multi-hundred-ms
+    // remaps on the next load and has coincided with NVIDIA TDR; leave it
+    // mapped until headroom returns.
+    if !crate::residency::pressured() {
+        crate::pipeline::trim_library();
+    }
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
     crate::resource::let_go_idle();
@@ -2759,11 +2770,27 @@ mod relay_tests {
 /// descriptor slots, upload
 /// memory and scratch chunks are held until then, and a frame's lists held
 /// all at once ran the slots out before (run 45).
+///
+/// Under host-memory pressure the cap drops (64, or 32 when critical) so
+/// submit prep cannot pile up multi-second waits that trip NVIDIA TDR.
+/// On ≤32 GiB hosts the default base is 96 instead of 256.
 fn late_most() -> usize {
-    static MOST: OnceLock<usize> = OnceLock::new();
-    *MOST.get_or_init(|| {
-        std::env::var("VICTORY_LATE_WAIT_LISTS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(256).max(1)
-    })
+    static BASE: OnceLock<usize> = OnceLock::new();
+    let base = *BASE.get_or_init(|| {
+        let default = if crate::residency::limited_host_ram() { 96 } else { 256 };
+        std::env::var("VICTORY_LATE_WAIT_LISTS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+            .max(1)
+    });
+    if crate::residency::critical() {
+        base.min(32)
+    } else if crate::residency::pressured() {
+        base.min(64)
+    } else {
+        base
+    }
 }
 
 /// Whether a submission with bottom-of-pipe writes may fly
@@ -5696,15 +5723,36 @@ impl Host {
             }
             sweep();
             SWEPT.store(now_ms(), Ordering::Relaxed);
-        } else if late_free_present() && now_ms() > SWEPT.load(Ordering::Relaxed) + 1500 {
+        } else if late_free_present() {
             // With the present sent ahead nothing else brings a moment
-            // with nothing in the air: one is made for the sweep.
-            self.settle(&mut submitted, WHY_SYNC);
-            if upcheck::on() {
-                upcheck::at_rest(self);
+            // with nothing in the air: one is made for the sweep. Under
+            // critical host RAM a full settle+reclaim here has blocked
+            // submit prep for >10 s and tripped NVIDIA TDR; refresh
+            // admission and trim pool spares only, and space full sweeps
+            // further apart while merely pressured.
+            let interval = if crate::residency::critical() {
+                4_000
+            } else if crate::residency::pressured() {
+                2_500
+            } else {
+                1_500
+            };
+            if now_ms() > SWEPT.load(Ordering::Relaxed) + interval {
+                if crate::residency::critical() {
+                    crate::residency::refresh();
+                    crate::pool::room(host().and_then(|h| h.video_memory()));
+                    if crate::residency::pressured() || crate::residency::trim_idle() {
+                        trim_spare_chunks();
+                    }
+                } else {
+                    self.settle(&mut submitted, WHY_SYNC);
+                    if upcheck::on() {
+                        upcheck::at_rest(self);
+                    }
+                    sweep();
+                }
+                SWEPT.store(now_ms(), Ordering::Relaxed);
             }
-            sweep();
-            SWEPT.store(now_ms(), Ordering::Relaxed);
         }
         let behind = late && flying();
         stage.next("submit: gathering what to ask about");
