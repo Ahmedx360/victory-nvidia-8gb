@@ -5,8 +5,9 @@ if not "%~1"=="" if /i not "%~1"=="pareto-residency" (
   exit /b 2
 )
 if not defined VICTORY_GAME_DIR set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
-if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
-  echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
+if not defined VICTORY_TITLE_EXE set "VICTORY_TITLE_EXE=%VICTORY_GAME_DIR%\game_scarlett_master.exe"
+if not exist "%VICTORY_TITLE_EXE%" (
+  echo Set VICTORY_TITLE_EXE or VICTORY_GAME_DIR to point to your own title files. 1>&2
   exit /b 2
 )
 set "runner=%VICTORY_RUNNER%"
@@ -44,5 +45,5 @@ if /i not "%VICTORY_CONSOLE%"=="series-s" if /i not "%VICTORY_CONSOLE%"=="series
   echo Set VICTORY_CONSOLE to series-s or series-x. 1>&2
   exit /b 2
 )
-"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console %VICTORY_CONSOLE% --execute
+"%runner%" run "%VICTORY_TITLE_EXE%" --console %VICTORY_CONSOLE% --execute
 exit /b %errorlevel%
