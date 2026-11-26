@@ -27,7 +27,10 @@ $settings = @{
 }
 if ($Borderless) { $settings.VICTORY_BORDERLESS = '1' }
 if ($Water) { $settings.VICTORY_TEXTURE_BACK = '1' }
-if ($NoOverlay) { $settings.VICTORY_PANEL = '0' }
+if ($NoOverlay) {
+    $settings.VICTORY_OVERLAY = '0'
+    $settings.VICTORY_PANEL = '0'
+}
 
 $saved = @{}
 try {
