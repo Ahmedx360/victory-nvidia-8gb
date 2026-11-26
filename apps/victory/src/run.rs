@@ -214,13 +214,18 @@ pub fn run(
     let mut telemetry = if no_telemetry || !cfg.telemetry_enabled {
         None
     } else {
-        let dir = cfg.data_subdir("telemetry")?;
-        victory_telemetry::start(victory_telemetry::Options {
-            dir,
-            title_hash: hash.to_string(),
-            console: victory_hle::console::current().name().to_owned(),
-            disabled: false,
-        })
+        match cfg.data_subdir("telemetry") {
+            Ok(dir) => victory_telemetry::start(victory_telemetry::Options {
+                dir,
+                title_hash: hash.to_string(),
+                console: victory_hle::console::current().name().to_owned(),
+                disabled: false,
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "telemetry directory unavailable; continuing without telemetry");
+                None
+            }
+        }
     };
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };

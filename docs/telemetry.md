@@ -3,13 +3,14 @@
 `adel VIctory` sends one anonymous performance report for every
 `victory run --execute`. It is **on by default** so frame-rate regressions can
 be compared between builds and machines. Reports go to
-`https://rxnd.de/vi/v1`; a complete local copy is written first, so a network
-failure never loses a report and never affects the game.
+`https://rxnd.de/vi/v1`; local files are written before upload, so a network
+failure leaves the recorded data available locally. Uploads are not retried
+automatically. Network timeouts can delay recorder shutdown.
 
 ## Opting out
 
 Any one of these turns it off completely (no registration, no ping, no upload,
-no recorder thread):
+no recorder thread, no screenshots):
 
 ```powershell
 $env:VICTORY_TELEMETRY = '0'          # environment, highest precedence
@@ -55,15 +56,27 @@ already measures (the same numbers shown in the title caption):
 - `gpu_temp_c` — **not collected in v1**: `null` with reason
   `NVAPI temperature reader not enabled in v1`. GPU load and VRAM are present.
 
-The client also computes mean/min/max fps, p50/p95/p99 frame time, 1% low,
-longest stall and a stutter count. The server recomputes all of these from the
-raw samples so a client bug cannot be mistaken for a real regression, and
-renders an SVG FPS graph for each run.
+The client and server compute summary statistics from these one-second
+averages and the server renders an SVG FPS graph. The fields named frame-time
+percentiles, 1% low, longest stall and stutter count describe the sampled
+window averages; they are not per-frame measurements and can miss short
+stalls. They should not be compared with frame-level benchmark results.
 
-**Never collected:** game files, save data, screenshots, window titles,
-usernames, file paths, email addresses, IP or MAC addresses, or peripheral
-serials. The server additionally redacts `C:\Users\<name>`, `/home/<name>`,
-emails and IPv4 addresses as a backstop.
+### Screenshots
+
+For the first ten minutes of a run the recorder also captures the **foreground
+game window** every ten seconds (up to 60 frames, named `01.jpg` … `60.jpg`).
+Each frame is downscaled to at most 480 px on the long edge and encoded as a
+low-quality JPEG, then uploaded to
+`POST /vi/v1/runs/<id>/screenshots/<nn>.jpg`. Capture is skipped when the
+foreground window is not this process, when Windows cannot provide pixels, or
+when the bitmap is effectively blank (common for some exclusive-fullscreen
+paths). Local copies stay under `screenshots-<run_id>/`.
+
+**Never collected:** game files, save data, usernames, file paths, email
+addresses, IP or MAC addresses, or peripheral serials. The server additionally
+redacts `C:\Users\<name>`, `/home/<name>`, emails and IPv4 addresses as a
+backstop.
 
 ## Anonymous identity
 
@@ -73,7 +86,9 @@ logical core count. No account name or path goes into it. It posts that ID to
 `/v1/register` and stores the returned per-installation bearer token
 (`vti_...`) in `<data_dir>/telemetry/token`. Every later ping and report uses
 that token, so one PC's runs can be grouped without knowing who owns it. The
-server stores only a hash of the token; the all-powerful admin token lives on
+ID is saved locally in `machine_id`; existing installations recover their ID
+from the server using their existing token before saving it.
+The server stores only a hash of the token; the all-powerful admin token lives on
 the server and is **never** compiled into or shipped with the client.
 
 Optional: set `VICTORY_TELEMETRY_ALIAS` (for example `GTX1660-lab`) to label
@@ -86,8 +101,11 @@ contains:
 
 - `NOTICE.txt` — the first-run disclosure and opt-out instructions;
 - `token` — this installation's bearer token;
+- `machine_id` — the installation ID associated with that token;
 - `manifest-<run_id>.json`, `samples-<run_id>.jsonl`, `summary-<run_id>.json`
-  — one set per run, kept even when the upload fails.
+  — one set per run, kept even when the upload fails;
+- `screenshots-<run_id>/NN.jpg` — local copies of the bounded game-window
+  captures for that run.
 
 ## Server
 
@@ -100,5 +118,7 @@ timeouts; a failed upload only writes a warning to the log.
 
 Admin endpoints (require the server's admin token) include
 `GET /vi/v1/users`, `GET /vi/v1/runs?git_sha=<sha>`, `GET /vi/v1/stats` and
-`GET /vi/v1/runs/<id>/graph.svg`. Installation tokens can only read and write
-their own runs. See the server README for deployment details.
+`GET /vi/v1/runs/<id>/graph.svg`. The authenticated HTML dashboard is at
+`GET /vi/v1/view` and shows installations, per-run FPS/CPU/GPU/RAM charts,
+trends across runs, and the screenshot gallery. Installation tokens can only
+read and write their own runs. See the server README for deployment details.
