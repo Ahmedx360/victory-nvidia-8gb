@@ -1309,14 +1309,21 @@ fn fills(desc: &ResourceDesc) -> bool {
 /// between such a texture and another are skipped (`list.rs` `unlike`).
 #[cfg(windows)]
 pub(crate) fn drop_levels(desc: &ResourceDesc) -> u32 {
+    drop_levels_with(desc, None)
+}
+
+#[cfg(windows)]
+pub(crate) fn drop_levels_with(desc: &ResourceDesc, override_n: Option<u32>) -> u32 {
     const TEXTURE_2D: u32 = 3;
     static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    let n = *N.get_or_init(|| {
-        std::env::var("VICTORY_TEXTURE_DROP_MIPS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or(0)
-            .min(4)
+    let n = override_n.unwrap_or_else(|| {
+        *N.get_or_init(|| {
+            std::env::var("VICTORY_TEXTURE_DROP_MIPS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(0)
+                .min(4)
+        })
     });
     if n == 0 || !fills(desc) || desc.dimension != TEXTURE_2D || desc.sample_count > 1 || desc.mip_levels < 5 {
         return 0;
@@ -3164,6 +3171,26 @@ mod tests {
         assert_eq!(shifted(1, 3, 2, 2.5), (2, 2, 1.5));
         assert_eq!(shifted(2, 1, 1, 0.0), (0, 1, 0.0));
         assert_eq!(shifted(0, 3, 2, 1.0), (3, 2, 1.0));
+    }
+
+    #[test]
+    fn drop_mips_overhead_halving_simulation() {
+        // A 2048x2048 and 1024x1024 2D texture representation
+        let mut desc_2k = texture(2048, 2048, 28 /* R8G8B8A8_UNORM */, 12);
+        desc_2k.flags = 0; // fills
+
+        // Drop 0
+        assert_eq!(drop_levels_with(&desc_2k, Some(0)), 0);
+        // Drop 1 -> drops 1 mip level (halves width/height -> cuts VRAM bytes to ~25%)
+        assert_eq!(drop_levels_with(&desc_2k, Some(1)), 1);
+        // Drop 2 -> drops 2 mip levels (cuts VRAM bytes to ~6.25% of original)
+        assert_eq!(drop_levels_with(&desc_2k, Some(2)), 2);
+        // Drop 3 -> drops 3 mip levels
+        assert_eq!(drop_levels_with(&desc_2k, Some(3)), 3);
+
+        // Small texture (under 512) does not drop mips to preserve UI/small details
+        let desc_small = texture(256, 256, 28, 9);
+        assert_eq!(drop_levels_with(&desc_small, Some(2)), 0);
     }
 
     type Release = extern "system" fn(This) -> u32;

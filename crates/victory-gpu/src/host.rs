@@ -123,7 +123,17 @@ pub(crate) fn available_physical_ram() -> Option<u64> {
 /// Effective idle timeout (in milliseconds) for VRAM-backed host textures,
 /// scaled down under VRAM pressure. Never returns less than 1,000 ms so
 /// handles not yet recorded into a list or slot remain protected.
+/// Can be overridden with `VICTORY_VRAM_IDLE_MS` (at least 1,000 ms).
 pub(crate) fn vram_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
+    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    if let Some(ms) = *OVERRIDE.get_or_init(|| {
+        std::env::var("VICTORY_VRAM_IDLE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|ms| ms.max(1_000))
+    }) {
+        return ms;
+    }
     const NORMAL_MS: u64 = 5_000;
     const MODERATE_MS: u64 = 2_500;
     const HIGH_MS: u64 = 1_000;

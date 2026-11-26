@@ -494,6 +494,8 @@ fn fast_defaults() {
         ("VICTORY_VIEW_KNOWN", "1"),
         ("VICTORY_CLAMP_SCOPED", "1"),
         ("VICTORY_BARRIER_MERGE", "1"),
+        ("VICTORY_CARD_ROOM_FOR_TARGETS_MB", "3072"),
+        ("VICTORY_TEXTURE_ROOM_PERCENT", "88"),
     ];
     for (name, value) in FAST {
         if std::env::var_os(name).is_none() {
