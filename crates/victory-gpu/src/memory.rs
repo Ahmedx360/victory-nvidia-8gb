@@ -211,6 +211,28 @@ unsafe impl Send for Memory {}
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 
+/// For the memory census: copies the directory of title memory by address
+/// has numbered and the bytes of title memory they copy, and of those the
+/// ones only the directory still holds (nothing else would keep them alive)
+/// and their bytes. The directory never lets go of a number, so the last
+/// two say what that costs. `None` while the directory is busy.
+pub(crate) fn retained() -> Option<[u64; 4]> {
+    let guard = MEMORY.try_lock().ok()?;
+    let Some(memory) = guard.as_ref() else {
+        return Some([0; 4]);
+    };
+    let mut out = [0u64; 4];
+    for copy in &memory.copies {
+        out[0] += 1;
+        out[1] += copy.title_len();
+        if Arc::strong_count(copy) == 1 {
+            out[2] += 1;
+            out[3] += copy.title_len();
+        }
+    }
+    Some(out)
+}
+
 /// What a draw binds.
 pub(crate) struct Ready {
     pub(crate) directory: u64,
