@@ -396,7 +396,10 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
             }
         }
     };
+    // An upload from title memory can have already used this view. Only
+    // a copy from the same GPU source can satisfy this read.
     let first = list.first_use(placed as usize);
+    let new_source = list.alias_source_changed(to, from);
     // Before the list touches either texture: the copy goes to the
     // prelude, which leaves it out if the source was not written since.
     if alias_once()
@@ -430,7 +433,7 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
         unsafe { list.list.ResourceBarrier(&[barrier]) };
         before
     });
-    if !first && before.is_none() {
+    if !new_source && before.is_none() {
         return true;
     }
     card_writes(list, placed, to, None);
