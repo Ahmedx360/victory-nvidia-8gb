@@ -13,6 +13,11 @@
 //! the host textures and not again with the blocks, and the title's own
 //! memory is in the process's private commit only.
 //!
+//! Host lists' command allocators hold driver memory no counter here can
+//! see (about 9 GB of the 40-46 GB in `docs/findings.md`): the line gives
+//! the number of host lists alive beside the bytes, and the private commit
+//! includes what they hold.
+//!
 //! The card's own numbers (DXGI's budget and use of the local and the
 //! non-local group) are printed beside the sum of what this crate knows it
 //! put in local memory, so the gap between the two is the driver's, the
@@ -131,10 +136,11 @@ fn log(frame: u64) {
     tracing::warn!(
         target: "victory_gpu::census",
         "memory census frame {frame}: {line} dxgi_local_budget={} dxgi_nonlocal_budget={} unaccounted_local={} \
-         (MiB, now/peak)",
+         host_lists={} (MiB, now/peak; host_lists a count)",
         mib(budget),
         mib(nonlocal_budget),
         card.map_or("?".to_string(), |c| mib(c[1].saturating_sub(known_local))),
+        alive(0),
     );
 }
 
