@@ -4,7 +4,11 @@
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
-use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::Foundation::{FILETIME, HWND, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC, SRCCOPY, SelectObject,
+};
 use windows_sys::Win32::Networking::WinHttp::*;
 use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
 use windows_sys::Win32::System::Performance::*;
@@ -13,8 +17,15 @@ use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::SystemInformation::{
     GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetSystemTimes};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetSystemTimes};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+    IsWindowVisible, PW_RENDERFULLCONTENT, SM_CXSCREEN, SM_CYSCREEN,
+};
+
+unsafe extern "system" {
+    fn PrintWindow(hwnd: HWND, hdcblt: HDC, nflags: u32) -> i32;
+}
 
 use crate::json::{Json, find_string};
 
@@ -343,28 +354,81 @@ pub fn display() -> (u32, u32) {
 /// HTTPS POST through WinHTTP with the system trust store. Returns the status
 /// code and body; network failures are returned as text, never panics.
 pub fn post(path: &str, body: &str, token: Option<&str>) -> Result<(u16, String), String> {
-    request("POST", path, body, token)
+    request(
+        "POST",
+        path,
+        body.as_bytes(),
+        "application/json",
+        token,
+        Timeouts::default(),
+    )
+}
+
+/// JPEG screenshot upload with short timeouts so a stalled collector cannot
+/// block the recorder for a full sample period.
+pub fn post_jpeg(path: &str, body: &[u8], token: &str) -> Result<(u16, String), String> {
+    request(
+        "POST",
+        path,
+        body,
+        "image/jpeg",
+        Some(token),
+        Timeouts {
+            resolve: 2000,
+            connect: 2000,
+            send: 4000,
+            receive: 4000,
+        },
+    )
 }
 
 pub fn token_machine_id(token: &str) -> Option<String> {
-    let (status, body) = request("GET", "/vi/v1/stats", "", Some(token)).ok()?;
+    let (status, body) = request(
+        "GET",
+        "/vi/v1/stats",
+        b"",
+        "application/json",
+        Some(token),
+        Timeouts::default(),
+    )
+    .ok()?;
     if status != 200 {
         return None;
     }
     find_string(&body, "machine_id")
 }
 
+struct Timeouts {
+    resolve: i32,
+    connect: i32,
+    send: i32,
+    receive: i32,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            resolve: 3000,
+            connect: 3000,
+            send: 5000,
+            receive: 15_000,
+        }
+    }
+}
+
 fn request(
     method: &str,
     path: &str,
-    body: &str,
+    body: &[u8],
+    content_type: &str,
     token: Option<&str>,
+    timeouts: Timeouts,
 ) -> Result<(u16, String), String> {
     let agent = wide("adel-VIctory-telemetry/1.0");
     let host = wide("rxnd.de");
     let verb = wide(method);
     let resource = wide(path);
-    let mut headers = String::from("Content-Type: application/json\r\n");
+    let mut headers = format!("Content-Type: {content_type}\r\n");
     if let Some(token) = token {
         headers.push_str("Authorization: Bearer ");
         headers.push_str(token);
@@ -403,7 +467,13 @@ fn request(
             WinHttpCloseHandle(session);
             return Err("WinHttpOpenRequest failed".into());
         }
-        WinHttpSetTimeouts(request, 3000, 3000, 5000, 15_000);
+        WinHttpSetTimeouts(
+            request,
+            timeouts.resolve,
+            timeouts.connect,
+            timeouts.send,
+            timeouts.receive,
+        );
         let ok = WinHttpSendRequest(
             request,
             headers.as_ptr(),
@@ -463,6 +533,144 @@ fn request(
             String::from_utf8_lossy(&response).into_owned(),
         ))
     }
+}
+
+/// Captures the foreground game window as a heavily compressed JPEG.
+/// Returns `None` when the window is not ours, hidden, empty, or capture fails.
+pub fn capture_game_jpeg() -> Option<Vec<u8>> {
+    // SAFETY: window handles are queried and validated before use; GDI objects
+    // created below are released on every exit path.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+        let mut owner = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut owner);
+        if owner != GetCurrentProcessId() {
+            return None;
+        }
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        let width = rect.right.saturating_sub(rect.left);
+        let height = rect.bottom.saturating_sub(rect.top);
+        if width < 32 || height < 32 {
+            return None;
+        }
+        let window_dc = GetDC(hwnd);
+        if window_dc.is_null() {
+            return None;
+        }
+        let memory_dc = CreateCompatibleDC(window_dc);
+        if memory_dc.is_null() {
+            ReleaseDC(hwnd, window_dc);
+            return None;
+        }
+        let bitmap = CreateCompatibleBitmap(window_dc, width, height);
+        if bitmap.is_null() {
+            DeleteDC(memory_dc);
+            ReleaseDC(hwnd, window_dc);
+            return None;
+        }
+        let previous = SelectObject(memory_dc, bitmap);
+        let printed = PrintWindow(hwnd, memory_dc, PW_RENDERFULLCONTENT);
+        if printed == 0 {
+            BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, SRCCOPY);
+        }
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            ..Default::default()
+        };
+        let stride = (width as usize) * 4;
+        let mut bgra = vec![0u8; stride * height as usize];
+        let copied = GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height as u32,
+            bgra.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        SelectObject(memory_dc, previous);
+        DeleteObject(bitmap);
+        DeleteDC(memory_dc);
+        ReleaseDC(hwnd, window_dc);
+        if copied == 0 {
+            return None;
+        }
+        encode_downscaled_jpeg(&bgra, width as u32, height as u32)
+    }
+}
+
+fn encode_downscaled_jpeg(bgra: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    const MAX_EDGE: u32 = 480;
+    let scale = (width.max(height) as f32 / MAX_EDGE as f32).max(1.0);
+    let out_w = ((width as f32 / scale).round() as u32).max(1);
+    let out_h = ((height as f32 / scale).round() as u32).max(1);
+    let out_w_u16 = u16::try_from(out_w).ok()?;
+    let out_h_u16 = u16::try_from(out_h).ok()?;
+    let mut scaled = vec![0u8; (out_w * out_h * 4) as usize];
+    let mut visible = 0u32;
+    for y in 0..out_h {
+        let src_y = ((y as f32 + 0.5) * scale) as u32;
+        for x in 0..out_w {
+            let src_x = ((x as f32 + 0.5) * scale) as u32;
+            let i = ((src_y * width + src_x) * 4) as usize;
+            let b = *bgra.get(i)?;
+            let g = *bgra.get(i + 1)?;
+            let r = *bgra.get(i + 2)?;
+            let a = *bgra.get(i + 3).unwrap_or(&255);
+            if r | g | b != 0 {
+                visible += 1;
+            }
+            let o = ((y * out_w + x) * 4) as usize;
+            scaled[o] = b;
+            scaled[o + 1] = g;
+            scaled[o + 2] = r;
+            scaled[o + 3] = a;
+        }
+    }
+    // A fully black capture usually means the swapchain was not readable.
+    if visible * 100 < out_w * out_h {
+        return None;
+    }
+    let mut jpeg = Vec::new();
+    let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 28);
+    encoder
+        .encode(
+            &scaled,
+            out_w_u16,
+            out_h_u16,
+            jpeg_encoder::ColorType::Bgra,
+        )
+        .ok()?;
+    if jpeg.len() < 64 || jpeg.len() > 1024 * 1024 {
+        return None;
+    }
+    if !(jpeg.starts_with(&[0xff, 0xd8, 0xff]) && jpeg.ends_with(&[0xff, 0xd9])) {
+        return None;
+    }
+    Some(jpeg)
 }
 
 /// Registers this installation once and returns its per-machine token.

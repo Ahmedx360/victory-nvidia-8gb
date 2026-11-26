@@ -3,8 +3,9 @@
 //! On by default, with `VICTORY_TELEMETRY=0` (or `[telemetry] enabled = false`,
 //! or `victory run --no-telemetry`) as the opt-out. Every run writes a full
 //! local bundle before attempting an HTTPS upload, so a network failure never
-//! loses the data and never affects the game. No game files, screenshots,
-//! usernames, paths or addresses are collected.
+//! loses the data and never affects the game. Heavily compressed game-window
+//! JPEGs are also captured every ten seconds for the first ten minutes. No game
+//! files, usernames, paths or addresses are collected.
 
 // On non-Windows hosts only the portable maths and tests are compiled: there
 // is no recorder to call them, so the Windows-side plumbing is intentionally
@@ -147,10 +148,11 @@ fn notice(dir: &std::path::Path) {
         path,
         "adel VIctory sends anonymous performance reports to https://rxnd.de/vi \
          so frame-rate regressions can be compared across builds. Reports contain \
-         PC specs, driver versions, screen size, temperatures where available and \
-         the exact FPS timeline. They contain no game files, screenshots, usernames, \
-         file paths or network addresses. Your machine has an anonymous random key \
-         so runs from different PCs can be told apart.\n\n\
+         PC specs, driver versions, screen size, temperatures where available, \
+         the exact FPS timeline, and heavily compressed game-window screenshots \
+         every ten seconds for the first ten minutes. They contain no game files, \
+         usernames, file paths or network addresses. Your machine has an anonymous \
+         random key so runs from different PCs can be told apart.\n\n\
          Opt out with VICTORY_TELEMETRY=0, [telemetry] enabled = false in \
          victory.toml, or victory run --no-telemetry. Local copies of every report \
          stay in this directory.\n",
@@ -191,6 +193,54 @@ fn post(path: &str, body: &str, token: Option<&str>) {
             tracing::warn!(status, response = %response, "telemetry upload rejected")
         }
         Err(error) => tracing::warn!(error = %error, "telemetry upload failed; local report kept"),
+    }
+}
+
+/// Shot index 1..=60 for elapsed times in `[0, 600)` seconds (one every 10 s).
+fn screenshot_slot(elapsed: Duration) -> Option<u8> {
+    if elapsed >= Duration::from_secs(600) {
+        return None;
+    }
+    u8::try_from(elapsed.as_secs() / 10 + 1).ok()
+}
+
+#[cfg(windows)]
+fn maybe_capture_screenshot(
+    dir: &std::path::Path,
+    run_id: &str,
+    token: Option<&str>,
+    elapsed: Duration,
+    next_slot: &mut u8,
+) {
+    let Some(slot) = screenshot_slot(elapsed) else {
+        return;
+    };
+    if slot < *next_slot {
+        return;
+    }
+    *next_slot = slot.saturating_add(1);
+    let Some(jpeg) = windows::capture_game_jpeg() else {
+        return;
+    };
+    let name = format!("{slot:02}.jpg");
+    let shots = dir.join(format!("screenshots-{run_id}"));
+    let _ = std::fs::create_dir_all(&shots);
+    let path = shots.join(&name);
+    if std::fs::write(&path, &jpeg).is_err() {
+        return;
+    }
+    let Some(token) = token else {
+        return;
+    };
+    let remote = format!("/vi/v1/runs/{run_id}/screenshots/{name}");
+    match windows::post_jpeg(&remote, &jpeg, token) {
+        Ok((status, _)) if (200..300).contains(&status) => {}
+        Ok((status, response)) => {
+            tracing::warn!(status, response = %response, shot = %name, "telemetry screenshot rejected")
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, shot = %name, "telemetry screenshot upload failed; local copy kept")
+        }
     }
 }
 
@@ -304,11 +354,14 @@ fn record(options: Options, stop: Receiver<()>) {
     let mut samples: Vec<Sample> = Vec::new();
     let mut cursor = metrics::Cursor::default();
     let began = Instant::now();
+    let mut next_shot = 1u8;
+    maybe_capture_screenshot(&dir, &id, token.as_deref(), Duration::ZERO, &mut next_shot);
     loop {
         match stop.recv_timeout(Duration::from_millis(100)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        maybe_capture_screenshot(&dir, &id, token.as_deref(), began.elapsed(), &mut next_shot);
         let windows = metrics::drain(&mut cursor);
         let (cpu_pct, gpu_pct, ram_mb) = windows::rates();
         let (cpu_temp_c, cpu_temp_reason, gpu_temp_c, gpu_temp_reason) = windows::temperatures();
@@ -391,5 +444,14 @@ mod tests {
     fn civil_dates_cross_year_boundary() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(18_262), (2020, 1, 1));
+    }
+
+    #[test]
+    fn screenshot_slots_cover_first_ten_minutes() {
+        assert_eq!(screenshot_slot(Duration::from_secs(0)), Some(1));
+        assert_eq!(screenshot_slot(Duration::from_secs(9)), Some(1));
+        assert_eq!(screenshot_slot(Duration::from_secs(10)), Some(2));
+        assert_eq!(screenshot_slot(Duration::from_secs(599)), Some(60));
+        assert_eq!(screenshot_slot(Duration::from_secs(600)), None);
     }
 }

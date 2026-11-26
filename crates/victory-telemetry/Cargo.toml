@@ -12,6 +12,7 @@ blake3.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+jpeg-encoder = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
