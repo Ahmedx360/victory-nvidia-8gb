@@ -23,6 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, PW_RENDERFULLCONTENT, SM_CXSCREEN, SM_CYSCREEN,
 };
 
+#[link(name = "user32")]
 unsafe extern "system" {
     fn PrintWindow(hwnd: HWND, hdcblt: HDC, nflags: u32) -> i32;
 }
