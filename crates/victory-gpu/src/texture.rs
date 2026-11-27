@@ -1164,6 +1164,7 @@ fn record_upload(
     staging: &Staging,
     source: &ID3D12Resource,
     base: u64,
+    upload_indices: &[usize],
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     const COPY_DEST: u32 = 0x400;
@@ -1186,7 +1187,8 @@ fn record_upload(
     }
     crate::list::ensure_state(list, resource, COPY_DEST);
     // The staging/plane upload buffer lives until the list is reset.
-    for (i, footprint) in staging.footprints.iter().enumerate() {
+    for &i in upload_indices {
+        let footprint = &staging.footprints[i];
         #[cfg(feature = "diagnostics")]
         {
             let f = footprint.Footprint;
