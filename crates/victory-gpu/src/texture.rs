@@ -905,7 +905,34 @@ pub(crate) fn digest(bytes: &[u8]) -> Digest {
 
 /// See [`digest`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Digest(u128);
+pub(crate) fn pending_upload_versions(
+    dirty: &[std::sync::atomic::AtomicU64],
+    uploaded: &[std::sync::atomic::AtomicU64],
+) -> Vec<(usize, u64)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    dirty
+        .iter()
+        .zip(uploaded)
+        .enumerate()
+        .filter_map(|(index, (dirty, uploaded))| {
+            let version = dirty.load(Relaxed);
+            let sent = uploaded.load(Relaxed);
+            (version != sent).then_some((index, version))
+        })
+        .collect()
+}
+
+fn mark_upload_versions(
+    uploaded: &[std::sync::atomic::AtomicU64],
+    versions: &[(usize, u64)],
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    for &(index, version) in versions {
+        uploaded[index].fetch_max(version, Relaxed);
+    }
+}
+
+struct Digest(u128);
 
 /// Merge byte ranges, including ranges that merely touch.
 fn coalesce_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
@@ -1501,19 +1528,10 @@ impl Staging {
     }
 
     /// Subresources whose CPU staging content has not yet been copied to
-    /// the GPU. The version snapshot is retained by the submitted list so a
-    /// later refresh cannot be cleared by an older upload callback.
+    /// the GPU. The snapshot is retained by the submitted list so a later
+    /// refresh cannot be cleared by an older upload callback.
     fn pending_uploads(&self) -> Vec<(usize, u64)> {
-        self.dirty_versions
-            .iter()
-            .zip(&self.uploaded_versions)
-            .enumerate()
-            .filter_map(|(index, (dirty, uploaded))| {
-                let version = dirty.load(std::sync::atomic::Ordering::Relaxed);
-                let sent = uploaded.load(std::sync::atomic::Ordering::Relaxed);
-                (version != sent).then_some((index, version))
-            })
-            .collect()
+        pending_upload_versions(&self.dirty_versions, &self.uploaded_versions)
     }
 
     /// Snapshot every subresource, used for first uploads, one-shot bakes and
@@ -1530,10 +1548,7 @@ impl Staging {
 
     /// Mark only the exact versions a recorded copy command will transfer.
     fn mark_uploaded(&self, versions: &[(usize, u64)]) {
-        use std::sync::atomic::Ordering::Relaxed;
-        for &(index, version) in versions {
-            self.uploaded_versions[index].fetch_max(version, Relaxed);
-        }
+        mark_upload_versions(&self.uploaded_versions, versions);
     }
 
     /// The host copy holds what the staging buffer was filled from.
@@ -2466,6 +2481,37 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
     });
     map.insert(resource as usize, s.clone());
     Some(s)
+}
+
+#[cfg(test)]
+mod upload_version_tests {
+    use super::{mark_upload_versions, pending_upload_versions};
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn old_upload_callback_does_not_clear_a_newer_staging_version() {
+        let dirty = [AtomicU64::new(2), AtomicU64::new(4), AtomicU64::new(1)];
+        let uploaded = [AtomicU64::new(1), AtomicU64::new(2), AtomicU64::new(1)];
+        let snapshot = pending_upload_versions(&dirty, &uploaded);
+        assert_eq!(snapshot, vec![(0, 2), (1, 4)]);
+
+        // Another refresh writes subresource 1 after the list records its
+        // copy. The older callback may acknowledge only version 4, not 5.
+        dirty[1].store(5, std::sync::atomic::Ordering::Relaxed);
+        mark_upload_versions(&uploaded, &snapshot);
+        assert_eq!(pending_upload_versions(&dirty, &uploaded), vec![(1, 5)]);
+    }
+
+    #[test]
+    fn duplicate_or_out_of_order_upload_callbacks_are_monotonic() {
+        let uploaded = [AtomicU64::new(0), AtomicU64::new(0)];
+        mark_upload_versions(&uploaded, &[(0, 7), (1, 3)]);
+        mark_upload_versions(&uploaded, &[(0, 5), (1, 4)]);
+        assert_eq!(
+            uploaded.map(|version| version.load(std::sync::atomic::Ordering::Relaxed)),
+            [7, 4]
+        );
+    }
 }
 
 #[cfg(test)]
