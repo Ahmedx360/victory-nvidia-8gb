@@ -1928,7 +1928,85 @@ mod wide_tests {
 /// whose bytes are the GPU's and differ from the title's as read: only
 /// those are to be written, so a title write that lands between the read
 /// and the write elsewhere in the stretch stays (upstream VIctory #2009).
-/// `mask` is scratch.
+/// Three-way merge of GPU bytes, the pre-submit snapshot and current
+/// title bytes. The GPU wins only where the GPU changed a byte and the title
+/// left it untouched. AVX2 handles 32 bytes per iteration on supported CPUs.
+fn merge_back(
+    host: &mut [u8],
+    old: &[u8],
+    title: &mut [u8],
+    mask: &mut [u8],
+) -> bool {
+    debug_assert_eq!(host.len(), old.len());
+    debug_assert_eq!(host.len(), title.len());
+    debug_assert_eq!(host.len(), mask.len());
+    #[cfg(target_arch = "x86_64")]
+    if host.len() >= 32 && std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the runtime feature check guarantees AVX2 support and the
+        // helper uses unaligned loads bounded by the equal-length slices.
+        return unsafe { merge_back_avx2(host, old, title, mask) };
+    }
+    merge_back_scalar(host, old, title, mask)
+}
+
+fn merge_back_scalar(host: &mut [u8], old: &[u8], title: &mut [u8], mask: &mut [u8]) -> bool {
+    let mut differs = false;
+    for (((t, h), o), m) in title.iter_mut().zip(host.iter_mut()).zip(old).zip(mask.iter_mut()) {
+        let gpu = if (*h != *o) & (*t == *o) { 0xffu8 } else { 0 };
+        let merged = (*t & !gpu) | (*h & gpu);
+        *m = merged ^ *t;
+        differs |= *m != 0;
+        *t = merged;
+        *h = merged;
+    }
+    differs
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_back_avx2(
+    host: &mut [u8],
+    old: &[u8],
+    title: &mut [u8],
+    mask: &mut [u8],
+) -> bool {
+    use std::arch::x86_64::*;
+    let mut differs = false;
+    let n = host.len();
+    let mut i = 0;
+    while i + 32 <= n {
+        // SAFETY: each unaligned vector range is inside four equal-length slices.
+        let (gpu, before, current) = unsafe {
+            (
+                _mm256_loadu_si256(host.as_ptr().add(i).cast()),
+                _mm256_loadu_si256(old.as_ptr().add(i).cast()),
+                _mm256_loadu_si256(title.as_ptr().add(i).cast()),
+            )
+        };
+        let gpu_same = _mm256_cmpeq_epi8(gpu, before);
+        let title_same = _mm256_cmpeq_epi8(current, before);
+        // All-ones where the GPU changed a byte but title memory did not.
+        let take_gpu = _mm256_andnot_si256(gpu_same, title_same);
+        let merged = _mm256_blendv_epi8(current, gpu, take_gpu);
+        let changed = _mm256_xor_si256(merged, current);
+        differs |= _mm256_movemask_epi8(changed) != 0;
+        // SAFETY: destinations cover the same in-bounds vector range.
+        unsafe {
+            _mm256_storeu_si256(mask.as_mut_ptr().add(i).cast(), changed);
+            _mm256_storeu_si256(title.as_mut_ptr().add(i).cast(), merged);
+            _mm256_storeu_si256(host.as_mut_ptr().add(i).cast(), merged);
+        }
+        i += 32;
+    }
+    differs | merge_back_scalar(
+        &mut host[i..],
+        &old[i..],
+        &mut title[i..],
+        &mut mask[i..],
+    )
+}
+
+/// mask is scratch.
 fn back_piece(
     host: &mut [u8],
     old: &[u8],
@@ -1963,16 +2041,7 @@ fn back_piece(
     // through 0xffffffff00000000; PalmVIDev e0b70476, VIctory f39c6c2).
     mask.clear();
     mask.resize(n, 0);
-    let mut differs = 0u8;
-    for (((t, h), o), m) in title.iter_mut().zip(host.iter_mut()).zip(old).zip(mask.iter_mut()) {
-        let gpu = if (*h != *o) & (*t == *o) { 0xffu8 } else { 0 };
-        let merged = (*t & !gpu) | (*h & gpu);
-        *m = merged ^ *t;
-        differs |= *m;
-        *t = merged;
-        *h = merged;
-    }
-    if differs == 0 {
+    if !merge_back(host, old, title, mask) {
         return None;
     }
     let mut i = 0;
@@ -2301,7 +2370,77 @@ pub(crate) fn land_as_before(start: usize, now: usize, held: usize, n: usize, ti
 
 #[cfg(test)]
 mod merge_tests {
-    use super::{PIECE, back_piece, changed_runs, dword_runs, put_changed, word_runs};
+    use super::{
+        PIECE, back_piece, changed_runs, dword_runs, merge_back, merge_back_scalar,
+        put_changed, word_runs,
+    };
+
+    /// The vector merge matches the scalar reference across vector tails,
+    /// sparse changes, concurrent title changes and completely equal spans.
+    #[test]
+    fn vector_three_way_merge_matches_scalar_reference() {
+        for len in [0usize, 1, 7, 31, 32, 33, 63, 64, 255, 256, 257, 4096, 65536] {
+            let old: Vec<u8> = (0..len)
+                .map(|i| (i.wrapping_mul(31).wrapping_add(i / 17).wrapping_add(5)) as u8)
+                .collect();
+            for phase in 0..5 {
+                let mut host: Vec<u8> = old
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| if (i + phase * 13).is_multiple_of(19) { b ^ 0x5a } else { b })
+                    .collect();
+                let mut title: Vec<u8> = old
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| if (i + phase * 7).is_multiple_of(23) { b ^ 0xa5 } else { b })
+                    .collect();
+                let (mut host_scalar, mut title_scalar) = (host.clone(), title.clone());
+                let (mut mask, mut mask_scalar) = (vec![0; len], vec![0; len]);
+                let vector_changed = merge_back(&mut host, &old, &mut title, &mut mask);
+                let scalar_changed =
+                    merge_back_scalar(&mut host_scalar, &old, &mut title_scalar, &mut mask_scalar);
+                assert_eq!(vector_changed, scalar_changed, "len={len} phase={phase}");
+                assert_eq!(host, host_scalar, "host len={len} phase={phase}");
+                assert_eq!(title, title_scalar, "title len={len} phase={phase}");
+                assert_eq!(mask, mask_scalar, "mask len={len} phase={phase}");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_three_way_merge_matches_scalar_reference() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for len in [32usize, 33, 63, 64, 65, 257, 4096, 65536] {
+            let old: Vec<u8> = (0..len).map(|i| (i * 23 + i / 7) as u8).collect();
+            let mut host: Vec<u8> = old
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| if i % 13 == 0 { b ^ 0x77 } else { b })
+                .collect();
+            let mut title: Vec<u8> = old
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| if i % 17 == 0 { b ^ 0x33 } else { b })
+                .collect();
+            let (mut reference_host, mut reference_title) = (host.clone(), title.clone());
+            let (mut mask, mut reference_mask) = (vec![0; len], vec![0; len]);
+            // SAFETY: the test returns early without AVX2; slices all have len bytes.
+            let got = unsafe { super::merge_back_avx2(&mut host, &old, &mut title, &mut mask) };
+            let expected = merge_back_scalar(
+                &mut reference_host,
+                &old,
+                &mut reference_title,
+                &mut reference_mask,
+            );
+            assert_eq!(got, expected);
+            assert_eq!(host, reference_host);
+            assert_eq!(title, reference_title);
+            assert_eq!(mask, reference_mask);
+        }
+    }
 
     /// A piece put back takes the GPU's bytes where the copy changed and
     /// the title's everywhere else, reads and writes title memory only from
