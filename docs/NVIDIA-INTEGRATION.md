@@ -101,10 +101,12 @@ updates keep the full refresh fallback.
 For fully committed title memory, refresh now tries the mapping read lock
 without waiting and detiles in place. If the lock is busy or any page is
 missing, it uses the existing kernel-copy path instead. D3D12 copy commands
-are also restricted to subresources with a staged version newer than the last
-version copied to VRAM. The recorded version snapshot prevents a later refresh
-from being marked uploaded by an older list. First uploads, one-shot bakes and
-on-demand residency transitions still copy all subresources.
+are also restricted to the subresources selected for the draw. Those
+indices travel with the deferred texture step; the batch refreshes the CPU
+staging first and then acknowledges only the selected subresources. Repeated
+references merge their selected indices before the flush, and dependent host
+callbacks run after the refresh. First uploads, one-shot bakes and on-demand
+residency transitions still copy all subresources.
 
 Per-thread texture scratch is retained up to 16 MiB on hosts with at most
 32 GiB RAM, or 64 MiB on larger hosts. Set
