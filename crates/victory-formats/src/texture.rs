@@ -642,6 +642,94 @@ impl Layout {
         self.walk::<true>(tiled, linear, mip, slice, row_pitch, depth_pitch)
     }
 
+    /// Byte ranges of tiled memory read by one mip and array slice.
+    ///
+    /// Mips in a packed tail may share ranges; callers must treat an overlap
+    /// as affecting every subresource whose extent contains those bytes.
+    pub fn extents(&self, mip: u32, slice: u32) -> Result<Vec<std::ops::Range<u64>>, Error> {
+        let m = self.mips.get(mip as usize).ok_or(Error::Invalid)?;
+        let depth = m.depth;
+        let first = if self.desc.dimension == Dimension::Tex3d {
+            if slice != 0 {
+                return Err(Error::Invalid);
+            }
+            0
+        } else {
+            slice
+        };
+        if first >= self.slices {
+            return Err(Error::Invalid);
+        }
+        if !self.addressable() {
+            return Err(Error::Unsupported);
+        }
+
+        let element_bytes = self.desc.element_bytes as usize;
+        let row_bytes = (m.width as usize)
+            .checked_mul(element_bytes)
+            .ok_or(Error::TooSmall)?;
+        let linear = self.desc.swizzle == Swizzle::LINEAR;
+        // The same contiguous x-runs repeat on every row and depth slice.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        if linear {
+            runs.push((0, row_bytes));
+        } else {
+            let mut run_start = self.column(m, 0) as usize;
+            let mut linear_start = 0usize;
+            for x in 1..m.width {
+                let tiled = self.column(m, x) as usize;
+                let at = (x as usize)
+                    .checked_mul(element_bytes)
+                    .ok_or(Error::TooSmall)?;
+                if tiled != run_start + (at - linear_start) {
+                    runs.push((run_start, at - linear_start));
+                    run_start = tiled;
+                    linear_start = at;
+                }
+            }
+            runs.push((run_start, row_bytes - linear_start));
+        }
+
+        let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
+        for z in 0..depth {
+            let (array, inner_z) = self.split(first + z);
+            let base = u64::from(array)
+                .checked_mul(self.slice_size)
+                .and_then(|v| v.checked_add(m.offset))
+                .ok_or(Error::TooSmall)?;
+            for y in 0..m.height {
+                let row = if linear {
+                    u64::from(y)
+                        .checked_mul(u64::from(m.pitch))
+                        .and_then(|v| v.checked_mul(u64::from(self.desc.element_bytes)))
+                        .ok_or(Error::TooSmall)?
+                } else {
+                    self.row(m, y, inner_z)
+                };
+                for &(offset, len) in &runs {
+                    let start = base
+                        .checked_add(row)
+                        .and_then(|v| v.checked_add(offset as u64))
+                        .ok_or(Error::TooSmall)?;
+                    let end = start.checked_add(len as u64).ok_or(Error::TooSmall)?;
+                    if start >= end || end > self.size {
+                        return Err(Error::TooSmall);
+                    }
+                    spans.push(start..end);
+                }
+            }
+        }
+        spans.sort_unstable_by_key(|range| range.start);
+        let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(spans.len());
+        for range in spans {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        Ok(merged)
+    }
+
     /// The reverse of [`Layout::detile`]: linear rows into tiled memory.
     pub fn tile(
         &self,
@@ -945,6 +1033,65 @@ mod tests {
             block: 1,
             samples: 1,
             swizzle,
+        }
+    }
+
+    #[test]
+    fn extents_cover_every_byte_detile_reads_and_nothing_else() {
+        let cases = [
+            desc(64, 64, 7, 16, Swizzle::SW_64KB_D),
+            desc(100, 60, 7, 4, Swizzle::SW_64KB_D),
+            desc(250, 175, 8, 8, Swizzle::SW_4KB_S),
+            desc(33, 17, 6, 1, Swizzle::SW_4KB_D),
+            desc(30, 20, 5, 4, Swizzle::LINEAR),
+            desc(83, 31, 6, 1, Swizzle::SW_256B_S),
+            Desc { depth: 3, ..desc(70, 70, 4, 16, Swizzle::SW_4KB_S) },
+            Desc {
+                dimension: Dimension::Tex3d,
+                depth: 16,
+                ..desc(64, 32, 7, 4, Swizzle::SW_4KB_S)
+            },
+        ];
+        for desc in cases {
+            let layout = Layout::new(&desc).unwrap();
+            let tiled: Vec<u8> = (0..layout.size as usize)
+                .map(|i| (i.wrapping_mul(31).wrapping_add(i / 251)) as u8)
+                .collect();
+            let slices = if desc.dimension == Dimension::Tex3d { 1 } else { desc.depth };
+            for slice in 0..slices {
+                for mip in 0..desc.mips {
+                    let extents = layout.extents(mip, slice).unwrap();
+                    assert!(!extents.is_empty(), "{desc:?} mip {mip} slice {slice}");
+                    assert!(extents.iter().all(|range| range.start < range.end && range.end <= layout.size));
+                    for pair in extents.windows(2) {
+                        assert!(pair[0].end < pair[1].start, "{desc:?} mip {mip}: {extents:?}");
+                    }
+                    let contains = |at: u64| extents.iter().any(|range| range.contains(&at));
+                    let mip_desc = layout.mips[mip as usize];
+                    let element_bytes = u64::from(desc.element_bytes);
+                    for z in 0..mip_desc.depth {
+                        for y in 0..mip_desc.height {
+                            for x in 0..mip_desc.width {
+                                let at = layout.offset(mip, x, y, slice + z).unwrap();
+                                assert!(contains(at) && contains(at + element_bytes - 1), "{desc:?} mip {mip}");
+                            }
+                        }
+                    }
+                    let row = mip_desc.width as usize * element_bytes as usize;
+                    let plane = row * mip_desc.height as usize;
+                    let mut before = vec![0; plane * mip_desc.depth as usize];
+                    layout.detile(&tiled, mip, slice, &mut before, row, plane).unwrap();
+                    let mut altered = tiled.clone();
+                    for (index, byte) in altered.iter_mut().enumerate() {
+                        if !extents.iter().any(|range| range.contains(&(index as u64))) {
+                            *byte ^= 0xFF;
+                        }
+                    }
+                    let mut after = vec![0; before.len()];
+                    layout.detile(&altered, mip, slice, &mut after, row, plane).unwrap();
+                    assert_eq!(before, after, "{desc:?} mip {mip} slice {slice}");
+                }
+            }
         }
     }
 
