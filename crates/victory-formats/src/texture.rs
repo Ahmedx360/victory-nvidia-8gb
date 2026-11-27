@@ -1058,7 +1058,10 @@ mod tests {
             desc(33, 17, 6, 1, Swizzle::SW_4KB_D),
             desc(30, 20, 5, 4, Swizzle::LINEAR),
             desc(83, 31, 6, 1, Swizzle::SW_256B_S),
-            Desc { depth: 3, ..desc(70, 70, 4, 16, Swizzle::SW_4KB_S) },
+            Desc {
+                depth: 3,
+                ..desc(70, 70, 4, 16, Swizzle::SW_4KB_S)
+            },
             Desc {
                 dimension: Dimension::Tex3d,
                 depth: 16,
@@ -1070,14 +1073,25 @@ mod tests {
             let tiled: Vec<u8> = (0..layout.size as usize)
                 .map(|i| (i.wrapping_mul(31).wrapping_add(i / 251)) as u8)
                 .collect();
-            let slices = if desc.dimension == Dimension::Tex3d { 1 } else { desc.depth };
+            let slices = if desc.dimension == Dimension::Tex3d {
+                1
+            } else {
+                desc.depth
+            };
             for slice in 0..slices {
                 for mip in 0..desc.mips {
                     let extents = layout.extents(mip, slice).unwrap();
                     assert!(!extents.is_empty(), "{desc:?} mip {mip} slice {slice}");
-                    assert!(extents.iter().all(|range| range.start < range.end && range.end <= layout.size));
+                    assert!(
+                        extents
+                            .iter()
+                            .all(|range| range.start < range.end && range.end <= layout.size)
+                    );
                     for pair in extents.windows(2) {
-                        assert!(pair[0].end < pair[1].start, "{desc:?} mip {mip}: {extents:?}");
+                        assert!(
+                            pair[0].end < pair[1].start,
+                            "{desc:?} mip {mip}: {extents:?}"
+                        );
                     }
                     let contains = |at: u64| extents.iter().any(|range| range.contains(&at));
                     let mip_desc = layout.mips[mip as usize];
@@ -1086,14 +1100,19 @@ mod tests {
                         for y in 0..mip_desc.height {
                             for x in 0..mip_desc.width {
                                 let at = layout.offset(mip, x, y, slice + z).unwrap();
-                                assert!(contains(at) && contains(at + element_bytes - 1), "{desc:?} mip {mip}");
+                                assert!(
+                                    contains(at) && contains(at + element_bytes - 1),
+                                    "{desc:?} mip {mip}"
+                                );
                             }
                         }
                     }
                     let row = mip_desc.width as usize * element_bytes as usize;
                     let plane = row * mip_desc.height as usize;
                     let mut before = vec![0; plane * mip_desc.depth as usize];
-                    layout.detile(&tiled, mip, slice, &mut before, row, plane).unwrap();
+                    layout
+                        .detile(&tiled, mip, slice, &mut before, row, plane)
+                        .unwrap();
                     let mut altered = tiled.clone();
                     for (index, byte) in altered.iter_mut().enumerate() {
                         if !extents.iter().any(|range| range.contains(&(index as u64))) {
@@ -1101,7 +1120,9 @@ mod tests {
                         }
                     }
                     let mut after = vec![0; before.len()];
-                    layout.detile(&altered, mip, slice, &mut after, row, plane).unwrap();
+                    layout
+                        .detile(&altered, mip, slice, &mut after, row, plane)
+                        .unwrap();
                     assert_eq!(before, after, "{desc:?} mip {mip} slice {slice}");
                 }
             }
