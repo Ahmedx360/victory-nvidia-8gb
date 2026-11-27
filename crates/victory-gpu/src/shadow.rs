@@ -4485,6 +4485,11 @@ impl Shadow {
                 crate::host::copy_mapped(unsafe { self.data.add(a) }, (start + a) as *const u8, b - a, false);
                 crate::host::upcheck::note(self.id, a, &was, &self.card_held(a, b - a));
             });
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::add(
+                crate::copystat::C::ShadowKernelBytes,
+                (to - from) as u64,
+            );
         } else {
             Self::copy_title_memory(at, from as *const u8, to - from);
         }
