@@ -2378,9 +2378,71 @@ pub(crate) fn land_as_before(start: usize, now: usize, held: usize, n: usize, ti
 #[cfg(test)]
 mod merge_tests {
     use super::{
-        PIECE, back_piece, changed_runs, dword_runs, merge_back, merge_back_scalar,
+        PIECE, Shadow, back_piece, changed_runs, dword_runs, merge_back, merge_back_scalar,
         put_changed, word_runs,
     };
+
+    /// Large shadow reads use the direct path for fully committed source
+    /// memory, but retain the guarded kernel fallback for reserved holes.
+    #[test]
+    fn shadow_copy_reads_committed_chunks_directly_and_preserves_hole_fallback() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
+            VirtualFree,
+        };
+        const LEN: usize = 4 << 20;
+        // SAFETY: private source/destination reservations owned by this test.
+        unsafe {
+            let source = VirtualAlloc(
+                std::ptr::null(),
+                LEN,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            ) as *mut u8;
+            let destination = VirtualAlloc(
+                std::ptr::null(),
+                LEN,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            ) as *mut u8;
+            assert!(!source.is_null() && !destination.is_null());
+            for i in 0..LEN {
+                source.add(i).write((i.wrapping_mul(31).wrapping_add(i / 97)) as u8);
+            }
+            assert_eq!(Shadow::copy_title_memory(destination, source, LEN), LEN);
+            assert_eq!(
+                std::slice::from_raw_parts(destination, LEN),
+                std::slice::from_raw_parts(source, LEN)
+            );
+            assert_ne!(
+                VirtualFree(source.cast(), 0, MEM_RELEASE),
+                0
+            );
+            assert_ne!(
+                VirtualFree(destination.cast(), 0, MEM_RELEASE),
+                0
+            );
+
+            let hole = VirtualAlloc(std::ptr::null(), LEN, MEM_RESERVE, PAGE_NOACCESS) as *mut u8;
+            let fallback = VirtualAlloc(
+                std::ptr::null(),
+                LEN,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            ) as *mut u8;
+            assert!(!hole.is_null() && !fallback.is_null());
+            fallback.write_bytes(0xA5, LEN);
+            assert_eq!(Shadow::copy_title_memory(fallback, hole, LEN), 0);
+            assert!(
+                std::slice::from_raw_parts(fallback, LEN)
+                    .iter()
+                    .all(|&byte| byte == 0),
+                "the guarded fallback zeros an uncommitted source"
+            );
+            assert_ne!(VirtualFree(hole.cast(), 0, MEM_RELEASE), 0);
+            assert_ne!(VirtualFree(fallback.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
 
     /// The vector merge matches the scalar reference across vector tails,
     /// sparse changes, concurrent title changes and completely equal spans.
