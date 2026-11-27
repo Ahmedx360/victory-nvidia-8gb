@@ -259,24 +259,37 @@ mod tests {
     }
 
     #[test]
-    fn either_constraint_enters_pressure_and_both_must_recover() {
-        assert!(next_pressure(false, 12 * GIB, 5 * GIB));
-        assert!(next_pressure(false, 4 * GIB, 16 * GIB));
-        assert!(next_pressure(true, 5 * GIB, 8 * GIB));
-        assert!(next_pressure(true, 7 * GIB, 6 * GIB));
-        assert!(!next_pressure(true, 6 * GIB, 7 * GIB));
-        assert!(!next_pressure(false, 5 * GIB, 6 * GIB));
+    fn pressure_thresholds_hysteresis_for_large_hosts() {
+        assert!(next_pressure(false, 12 * GIB, 5 * GIB, 64 * GIB));
+        assert!(next_pressure(false, 4 * GIB, 16 * GIB, 64 * GIB));
+        assert!(next_pressure(true, 5 * GIB, 8 * GIB, 64 * GIB));
+        assert!(next_pressure(true, 7 * GIB, 6 * GIB, 64 * GIB));
+        assert!(!next_pressure(true, 6 * GIB, 7 * GIB, 64 * GIB));
+        assert!(!next_pressure(false, 5 * GIB, 6 * GIB, 64 * GIB));
     }
 
     #[test]
-    fn prefetch_respects_existing_budgets_and_resumes_after_recovery() {
-        assert_eq!(prefetch_limit(512 << 20, false, false, true, GIB), 32 << 20);
-        assert_eq!(prefetch_limit(512 << 20, false, false, true, GIB - 1), 512 << 20);
-        assert_eq!(prefetch_limit(512 << 20, false, false, false, 2 * GIB), 512 << 20);
-        assert_eq!(prefetch_limit(0, true, true, false, 0), 0);
-        assert_eq!(prefetch_limit(8 << 20, true, true, false, 0), 8 << 20);
-        assert_eq!(prefetch_limit(512 << 20, true, false, false, 0), 32 << 20);
-        assert_eq!(prefetch_limit(512 << 20, true, true, false, 0), 8 << 20);
-        assert_eq!(prefetch_limit(192 << 20, false, false, false, 0), 192 << 20);
+    fn sixteen_gib_hosts_enter_pressure_earlier() {
+        assert!(next_pressure(false, 5 * GIB, 8 * GIB, 16 * GIB));
+        assert!(next_pressure(false, 4 * GIB, 16 * GIB, 16 * GIB));
+        assert!(next_pressure(true, 5 * GIB, 8 * GIB, 16 * GIB));
+        assert!(!next_pressure(true, 6 * GIB, 8 * GIB, 16 * GIB));
+        assert!(!next_pressure(false, 5 * GIB + 1, 8 * GIB, 16 * GIB));
+    }
+
+    #[test]
+    fn prefetch_respects_host_memory_profile_and_resumes_after_recovery() {
+        assert_eq!(prefetch_limit_for(512 << 20, false, false, true, GIB, false), 32 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, false, false, true, GIB - 1, false), 512 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, false, false, false, 2 * GIB, false), 512 << 20);
+        assert_eq!(prefetch_limit_for(0, true, true, false, 0, false), 0);
+        assert_eq!(prefetch_limit_for(8 << 20, true, true, false, 0, false), 8 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, true, false, false, 0, false), 32 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, true, true, false, 0, false), 8 << 20);
+        assert_eq!(prefetch_limit_for(192 << 20, false, false, false, 0, false), 192 << 20);
+
+        assert_eq!(prefetch_limit_for(512 << 20, true, false, false, 0, true), 16 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, true, true, false, 0, true), 4 << 20);
+        assert_eq!(prefetch_limit_for(512 << 20, false, false, false, 0, true), 512 << 20);
     }
 }
