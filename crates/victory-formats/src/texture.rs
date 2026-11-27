@@ -690,13 +690,17 @@ impl Layout {
             runs.push((run_start, row_bytes - linear_start));
         }
 
-        let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
+        // A conservative bounding interval per depth slice bounds metadata
+        // regardless of texture dimensions. It can include bytes belonging
+        // to neighboring mips, which only causes an extra safe refresh.
+        let mut spans: Vec<std::ops::Range<u64>> = Vec::with_capacity(depth as usize);
         for z in 0..depth {
             let (array, inner_z) = self.split(first + z);
             let base = u64::from(array)
                 .checked_mul(self.slice_size)
                 .and_then(|v| v.checked_add(m.offset))
                 .ok_or(Error::TooSmall)?;
+            let mut extent: Option<std::ops::Range<u64>> = None;
             for y in 0..m.height {
                 let row = if linear {
                     u64::from(y)
@@ -715,8 +719,17 @@ impl Layout {
                     if start >= end || end > self.size {
                         return Err(Error::TooSmall);
                     }
-                    spans.push(start..end);
+                    match &mut extent {
+                        Some(current) => {
+                            current.start = current.start.min(start);
+                            current.end = current.end.max(end);
+                        }
+                        None => extent = Some(start..end),
+                    }
                 }
+            }
+            if let Some(extent) = extent {
+                spans.push(extent);
             }
         }
         spans.sort_unstable_by_key(|range| range.start);
