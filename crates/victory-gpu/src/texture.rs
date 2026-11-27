@@ -1126,12 +1126,11 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         list.defer_texture(staging);
         return;
     }
-    let upload_versions = if force_all {
-        staging.all_upload_versions()
+    let upload_indices: Vec<usize> = if force_all {
+        staging.all_upload_indices()
     } else {
-        pending_versions
+        pending_versions.into_iter().map(|(index, _)| index).collect()
     };
-    let upload_indices: Vec<usize> = upload_versions.iter().map(|&(index, _)| index).collect();
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::TexUploads, 1);
     if no_wait() && fill_unlocked() {
@@ -1150,19 +1149,6 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         staging.base,
         &upload_indices,
     );
-    // Versions are acknowledged individually. If a refresh ran after the
-    // snapshot above, its larger version is left pending instead of being
-    // accidentally cleared by this older submission.
-    {
-        let staging = staging.clone();
-        list.defer_host(move || {
-            staging.mark_uploaded(&upload_versions);
-            staging.uploaded.store(true, Relaxed);
-            staging
-                .dirty
-                .store(!staging.pending_uploads().is_empty(), Relaxed);
-        });
-    }
     // A host copy that took the place of one with fewer levels: the slots
     // that show that one are made again once this upload has run.
     if staging.first == staging.level0 && copy.grown.swap(false, Relaxed) {
@@ -1183,12 +1169,12 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
     };
     let Some(on_demand) = on_demand else {
         // Once per submission however many of its lists sample the texture.
-        list.defer_texture(staging);
+        list.defer_texture_upload(staging, upload_indices);
         // Then what the list's copy puts in the host copy is known.
         list.defer_host(move || noted.note_held());
         return;
     };
-    list.defer_texture(staging.clone());
+    list.defer_texture_upload(staging.clone(), upload_indices);
     list.defer_host(move || {
         let waiting = on_demand.uploaded(staging.detiled.load(Relaxed), staging.memory as u64);
         staging.waiting.store(
