@@ -1557,10 +1557,7 @@ impl Staging {
         if indices.is_empty() {
             return;
         }
-        for &index in indices {
-            let current = self.dirty_versions[index].load(Relaxed);
-            self.uploaded_versions[index].fetch_max(current, Relaxed);
-        }
+        mark_upload_versions(&self.dirty_versions, &self.uploaded_versions, indices);
         self.uploaded.store(true, Relaxed);
         self.dirty.store(!self.pending_uploads().is_empty(), Relaxed);
     }
