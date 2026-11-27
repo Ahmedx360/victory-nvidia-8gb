@@ -143,6 +143,15 @@ impl Back {
     /// write directly into title memory. This keeps the old all-or-nothing
     /// behavior if a footprint or layout is inconsistent.
     fn can_tile_in_place(&self) -> bool {
+        let Some(layout_size) = usize::try_from(self.layout.size).ok() else {
+            return false;
+        };
+        if self.mips == 0
+            || self.ticket.end.saturating_sub(self.ticket.at) < layout_size
+            || self.footprints.len() != self.rows.len()
+        {
+            return false;
+        }
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
             let mip = i as u32 % self.mips;
             let slice = i as u32 / self.mips;
@@ -174,6 +183,8 @@ impl Back {
                 None => return false,
             };
             if pitch < row_bytes
+                || rows != layout_mip.height
+                || f.Width != layout_mip.width
                 || (layout_mip.depth > 1 && depth_pitch < slice_bytes)
                 || f.Depth != layout_mip.depth
             {
