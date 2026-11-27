@@ -3425,6 +3425,15 @@ impl Shadow {
 
     /// [`Shadow::copy_back`]; `found`, if given, is the pieces of the range
     /// that differ from the snapshot, found beforehand ([`find_all`]).
+    /// Set VICTORY_SHADOW_BACK_PARALLEL=0 to keep copy-back pieces serial.
+    /// Parallel landing of disjoint pieces is enabled by default.
+    fn shadow_back_parallel_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var_os("VICTORY_SHADOW_BACK_PARALLEL").is_none_or(|value| value != "0")
+        })
+    }
+
     pub(crate) fn copy_back_with(&self, address: usize, len: usize, found: Option<Vec<(usize, usize)>>) -> usize {
         if self.place.is_some() {
             return 0;
@@ -3466,7 +3475,7 @@ impl Shadow {
                 .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0);
             debug_assert!(disjoint, "copy-back pieces must be disjoint and ordered");
             let piece_count = differing.len();
-            if piece_count >= 8 && disjoint {
+            if piece_count >= 8 && disjoint && Self::shadow_back_parallel_enabled() {
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(
                     crate::copystat::C::BackParallelPieces,
@@ -4428,6 +4437,15 @@ impl Shadow {
         to - from
     }
 
+    /// Set VICTORY_SHADOW_DIRECT_READ=0 to retain the guarded kernel-copy
+    /// path for A/B comparisons. Direct reads are enabled by default.
+    fn shadow_direct_read_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var_os("VICTORY_SHADOW_DIRECT_READ").is_none_or(|value| value != "0")
+        })
+    }
+
     /// Copy title memory into a host shadow. Fully committed chunks are read
     /// in place only while the runtime's mapping lock can be taken immediately.
     /// The bounded chunk size keeps streaming/remapping pauses short; a partial
@@ -4440,7 +4458,7 @@ impl Shadow {
         while offset < len {
             let count = (len - offset).min(DIRECT_CHUNK);
             // Avoid the mapping/working-set probes for tiny ranges.
-            let copied_direct = if count >= MIN_DIRECT {
+            let copied_direct = if count >= MIN_DIRECT && Self::shadow_direct_read_enabled() {
                 if let Some(_mapped) = crate::watch::title_memory_reading_now()
                     && crate::texture::committed(source.wrapping_add(offset), count)
                 {
