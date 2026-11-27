@@ -86,6 +86,10 @@ pub(crate) enum C {
     BackDiffer,
     BackSyncUs,
     BackParallelPieces,
+    /// Shadow-buffer refresh bytes read directly while mappings were stable,
+    /// versus bytes sent through the guarded kernel-copy path.
+    ShadowDirectBytes,
+    ShadowKernelBytes,
     /// Texture upload commands and subresources copied to D3D12 textures.
     TexUploads,
     TexCopySubresources,
@@ -1253,7 +1257,7 @@ pub(crate) fn log(frames: f64) {
          until the first submission; {:.1} ms from the last submission to the present call; \
          lists reset in {:.1} ms; the process ran {user:.0} ms user + {kernel:.0} ms kernel on \
          all threads; what shaders wrote: {:.1} ms finding {:.0} pieces that differ, {:.1} ms \
-         putting them back ({:.0} pieces merged in parallel); texture uploads: {:.0} recorded, {:.0} subresources copied, \
+         putting them back ({:.0} pieces merged in parallel); shadow reads {:.1} MB direct, {:.1} MB kernel; texture uploads: {:.0} recorded, {:.0} subresources copied, \
          {:.0} omitted by partial copies, {:.0} omitted by full skips, {:.0} whole uploads \
          left out; {:.1} held submissions run at the present with their waits not met; \
          waits for memory values: {:.0} looks {:.1} ms; {:.0} host lists made {:.1} ms; \
@@ -1265,7 +1269,9 @@ pub(crate) fn log(frames: f64) {
         ms(c[C::BackScanUs as usize]),
         c[C::BackDiffer as usize],
         ms(c[C::BackSyncUs as usize]),
-         c[C::BackParallelPieces as usize],
+        c[C::BackParallelPieces as usize],
+        mb(c[C::ShadowDirectBytes as usize]),
+        mb(c[C::ShadowKernelBytes as usize]),
         c[C::TexUploads as usize],
         c[C::TexCopySubresources as usize],
         c[C::TexCopyOmittedSubresources as usize],
