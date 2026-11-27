@@ -1,77 +1,91 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Exe,
-    [int]$DropMips = 2,
-    [string]$Resolution = "1920x1080",
+    [Parameter(Mandatory)][string]$Exe,
+    [ValidateSet('series-s', 'series-x')]
+    [string]$Console = $(if ([string]::IsNullOrWhiteSpace($env:VICTORY_CONSOLE)) {
+        'series-x'
+    } else {
+        $env:VICTORY_CONSOLE.ToLowerInvariant()
+    }),
+    [string]$Resolution = '1920x1080',
+    # This is an opt-in quality/performance trade-off for eligible tiled 2D textures.
+    [ValidateRange(0, 16384)][int]$TextureMaxDim = 1024,
+    [ValidateRange(0, 4)][int]$DropMips = 0,
     [switch]$Borderless,
     [switch]$Water,
     [switch]$NoOverlay,
+    # The 8 GB preset reduces retained idle allocations; use this to keep stock pool sizes.
+    [switch]$NoLowMemory,
     [switch]$WaitForTextureMemory,
-    [switch]$NoIntelFenceSleep
+    # Troubleshooting only: revert the MONITORX/MWAITX code patch.
+    [switch]$DisableWaitPatching,
+    # Kept so older invocations do not fail; this repository has no MWAITX sleep mode.
+    [switch]$NoIntelFenceSleep,
+    [ValidateRange(0, 262144)][int]$RamTrimMB = 0,
+    [ValidateRange(0, 100000)][int]$CensusFrames = 0,
+    [switch]$NoTelemetry
 )
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$victory = Join-Path $repoRoot "target\release\victory.exe"
-
-if (-not (Test-Path $victory)) {
-    Write-Error "Release binary not found at $victory. Build it first with: cargo build --release --bin victory"
-    exit 1
+$launchScript = Join-Path $PSScriptRoot 'play-nvidia-8gb.ps1'
+if (-not (Test-Path -LiteralPath $launchScript -PathType Leaf)) {
+    throw "NVIDIA profile launcher missing at $launchScript."
+}
+if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
+    throw "Title executable missing at $Exe."
 }
 
-# Start from a clean environment so stale VICTORY_* settings cannot override
-# the profile below.
-Remove-Item Env:VICTORY_* -ErrorAction SilentlyContinue
-
-if ($Resolution) {
-    $env:VICTORY_RESOLUTION = $Resolution
+if ($NoIntelFenceSleep) {
+    Write-Warning 'NoIntelFenceSleep is obsolete: VICTORY_MWAITX_SLEEP is not used by this branch. No wait mode is changed. Use -DisableWaitPatching only for a troubleshooting comparison.'
 }
-if ($Borderless) {
-    $env:VICTORY_BORDERLESS = "1"
-}
-if ($Water) {
-    $env:VICTORY_TEXTURE_BACK = "1"
-}
-if ($NoOverlay) {
-    $env:VICTORY_OVERLAY = "0"
+if ($DropMips -ne 0) {
+    Write-Warning 'DropMips is retained for older launch scripts. The integration guide marks forced mip dropping as experimental; prefer -TextureMaxDim for the supported low-VRAM experiment.'
 }
 
-$env:VICTORY_TEXTURE_DROP_MIPS = "$DropMips"
-$env:VICTORY_COPY_PLAIN = "1"
-$env:VICTORY_INDIRECT_GATHER = "1"
-$env:VICTORY_HEAP_WORKER = "1"
-$env:VICTORY_ALIAS_ONCE = "1"
-$env:VICTORY_JOIN_PARTS = "1"
-$env:VICTORY_BACK_OWN_VIEW = "1"
-$env:VICTORY_INDIRECT_WINDOW_DRAWS = "1"
-$env:VICTORY_GUARD_HOLES_FRAME = "1"
-$env:VICTORY_COPY_CHANGED = "1"
-$env:VICTORY_CARD_WINDOWS_MB = "2048"
-$env:VICTORY_CARD_BUFFERS_MB = "1024"
-$env:VICTORY_CLAMP_WAITS = "0"
-$env:VICTORY_WIDE_MERGE = "1"
-$env:VICTORY_RELAY_OWN_QUEUE = "1"
-
-# Main fix for the long texture stalls in the supplied diagnostics:
-# do not block texture refresh while the title runtime remaps its memory.
-# A texture may appear one frame later, but is never read partially.
+$overrides = @{}
+$temporary = @{}
 if ($WaitForTextureMemory) {
-    $env:VICTORY_TEXTURE_NO_WAIT = "0"
-} else {
-    $env:VICTORY_TEXTURE_NO_WAIT = "1"
+    $temporary.VICTORY_TEXTURE_NO_WAIT = '0'
 }
-
-# Intel hybrid CPU optimization: let long emulated fence waits sleep and
-# release a hardware thread for the submit/recording work.
-if (-not $NoIntelFenceSleep) {
-    $env:VICTORY_MWAITX_SLEEP = "1"
+if ($DisableWaitPatching) {
+    $temporary.VICTORY_PATCH_WAITS = '0'
 }
+$launchArgs = @{
+    Exe = $Exe
+    Console = $Console
+    Resolution = $Resolution
+    TextureMaxDim = $TextureMaxDim
+    DropMips = $DropMips
+    RamTrimMB = $RamTrimMB
+    CensusFrames = $CensusFrames
+}
+if (-not $NoLowMemory) { $launchArgs.LowMemory = $true }
+if ($Borderless) { $launchArgs.Borderless = $true }
+if ($Water) { $launchArgs.Water = $true }
+if ($NoOverlay) { $launchArgs.NoOverlay = $true }
+if ($NoTelemetry) { $launchArgs.NoTelemetry = $true }
 
-Write-Host "VIctory NVIDIA profile"
-Write-Host "  Resolution: $Resolution"
-Write-Host "  Texture mip drop: $DropMips"
+Write-Host 'VIctory NVIDIA 8 GB profile'
+Write-Host "  Console: $Console"
+Write-Host "  Resolution cap: $Resolution"
+Write-Host "  Texture max dimension: $TextureMaxDim (0 disables the cap)"
+Write-Host "  Reduced idle-memory retention: $(-not $NoLowMemory)"
 Write-Host "  Non-blocking texture refresh: $(-not $WaitForTextureMemory)"
-Write-Host "  Intel fence-wait sleep: $(-not $NoIntelFenceSleep)"
-Write-Host "  Card windows/buffers budgets: 2048 MB / 1024 MB"
-Write-Host "  Compare runs in the same scene and camera position."
+Write-Host "  Overlay: $(-not $NoOverlay)"
+Write-Host '  Use the same save, scene and camera position for A/B comparisons.'
 
-& $victory run --execute $Exe
+$exitCode = $null
+try {
+    foreach ($key in $temporary.Keys) {
+        $overrides[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+        [Environment]::SetEnvironmentVariable($key, $temporary[$key], 'Process')
+    }
+    & $launchScript @launchArgs
+    $exitCode = $LASTEXITCODE
+} finally {
+    foreach ($key in $overrides.Keys) {
+        [Environment]::SetEnvironmentVariable($key, $overrides[$key], 'Process')
+    }
+}
+if ($null -ne $exitCode) {
+    $global:LASTEXITCODE = $exitCode
+}
