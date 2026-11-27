@@ -432,15 +432,34 @@ fn waited<T>(slot: usize, f: impl FnOnce() -> T) -> T {
 }
 
 thread_local! {
-    /// Room to read a texture's memory into: one buffer per submitting
-    /// thread. Each texture kept its own, a second copy in memory of every
-    /// write-watched or partly mapped texture ever sampled, for the run.
+    /// Reusable scratch for ordinary texture reads. Large one-off textures
+    /// use a temporary allocation rather than pinning their full size on
+    /// every submission worker for the rest of the process.
     static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Calls `f` with `size` bytes of this thread's read buffer (their
-/// contents are whatever the last texture left).
+fn read_cache_limit() -> usize {
+    const MIB: usize = 1 << 20;
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let default_mb = if crate::residency::limited_host_ram() { 16 } else { 64 };
+        std::env::var("VICTORY_TEXTURE_READ_CACHE_MB")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(default_mb)
+            .min(512)
+            .saturating_mul(MIB)
+    })
+}
+
+/// Uses temporary or bounded per-thread scratch. The default retained scratch
+/// is 16 MiB on machines with at most 32 GiB of physical RAM and 64 MiB on
+/// larger machines; set VICTORY_TEXTURE_READ_CACHE_MB=0 to retain none.
 fn with_read<R>(size: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    if size > read_cache_limit() {
+        let mut temporary = vec![0u8; size];
+        return f(&mut temporary);
+    }
     READ.with(|read| {
         let mut read = read.borrow_mut();
         if read.len() < size {
