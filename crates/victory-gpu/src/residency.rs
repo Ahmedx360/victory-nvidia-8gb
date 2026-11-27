@@ -221,7 +221,13 @@ fn prefetch_limit_for(
     }
 }
 
-pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
+pub(crate) fn prefetch_limit(
+    bytes: u64,
+    pressure: bool,
+    critical: bool,
+    limited: bool,
+    staging: u64,
+) -> u64 {
     prefetch_limit_for(bytes, pressure, critical, limited, staging, very_limited_host_ram())
 }
 
@@ -279,14 +285,35 @@ mod tests {
 
     #[test]
     fn prefetch_respects_host_memory_profile_and_resumes_after_recovery() {
-        assert_eq!(prefetch_limit_for(512 << 20, false, false, true, GIB, false), 32 << 20);
-        assert_eq!(prefetch_limit_for(512 << 20, false, false, true, GIB - 1, false), 512 << 20);
-        assert_eq!(prefetch_limit_for(512 << 20, false, false, false, 2 * GIB, false), 512 << 20);
+        assert_eq!(
+            prefetch_limit_for(512 << 20, false, false, true, GIB, false),
+            32 << 20
+        );
+        assert_eq!(
+            prefetch_limit_for(512 << 20, false, false, true, GIB - 1, false),
+            512 << 20
+        );
+        assert_eq!(
+            prefetch_limit_for(512 << 20, false, false, false, 2 * GIB, false),
+            512 << 20
+        );
         assert_eq!(prefetch_limit_for(0, true, true, false, 0, false), 0);
-        assert_eq!(prefetch_limit_for(8 << 20, true, true, false, 0, false), 8 << 20);
-        assert_eq!(prefetch_limit_for(512 << 20, true, false, false, 0, false), 32 << 20);
-        assert_eq!(prefetch_limit_for(512 << 20, true, true, false, 0, false), 8 << 20);
-        assert_eq!(prefetch_limit_for(192 << 20, false, false, false, 0, false), 192 << 20);
+        assert_eq!(
+            prefetch_limit_for(8 << 20, true, true, false, 0, false),
+            8 << 20
+        );
+        assert_eq!(
+            prefetch_limit_for(512 << 20, true, false, false, 0, false),
+            32 << 20
+        );
+        assert_eq!(
+            prefetch_limit_for(512 << 20, true, true, false, 0, false),
+            8 << 20
+        );
+        assert_eq!(
+            prefetch_limit_for(192 << 20, false, false, false, 0, false),
+            192 << 20
+        );
 
         assert_eq!(prefetch_limit_for(512 << 20, true, false, false, 0, true), 16 << 20);
         assert_eq!(prefetch_limit_for(512 << 20, true, true, false, 0, true), 4 << 20);
