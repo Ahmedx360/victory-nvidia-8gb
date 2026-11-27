@@ -881,6 +881,82 @@ pub(crate) fn digest(bytes: &[u8]) -> Digest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Digest(u128);
 
+/// Merge byte ranges, including ranges that merely touch.
+fn coalesce_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.retain(|range| range.start < range.end);
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Whether two sorted, disjoint range lists share at least one byte.
+fn ranges_overlap(extents: &[Range<usize>], changed: &[Range<usize>]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < extents.len() && j < changed.len() {
+        let (extent, change) = (&extents[i], &changed[j]);
+        if extent.start < change.end && change.start < extent.end {
+            return true;
+        }
+        if extent.end <= change.end {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    false
+}
+
+/// Convert changed 4 KiB portions of 64 KiB pages to texture-relative ranges.
+fn dirty_part_ranges(start: usize, size: usize, pages: &[(usize, u16)]) -> Vec<Range<usize>> {
+    let end = start.saturating_add(size);
+    let mut ranges = Vec::new();
+    for &(page, mut parts) in pages {
+        let page_start = page.saturating_mul(crate::watch::PAGE);
+        while parts != 0 {
+            let first = parts.trailing_zeros() as usize;
+            let past = first + (!(parts >> first)).trailing_zeros() as usize;
+            parts = if past >= 16 { 0 } else { parts & (u16::MAX << past) };
+            let from = page_start
+                .saturating_add(first * crate::watch::KERNEL_PAGE)
+                .max(start);
+            let to = page_start
+                .saturating_add(past.min(16) * crate::watch::KERNEL_PAGE)
+                .min(end);
+            if from < to {
+                ranges.push(from - start..to - start);
+            }
+        }
+    }
+    coalesce_ranges(ranges)
+}
+
+/// The 4 KiB portions written since the texture's previous write-watch ask.
+fn dirty_page_ranges(
+    start: usize,
+    size: usize,
+    previous_asking: u64,
+    written: &[(usize, u64)],
+) -> Vec<Range<usize>> {
+    let pages: Vec<(usize, u64)> = written
+        .iter()
+        .filter(|&&(_, asking)| asking > previous_asking)
+        .map(|&(page, _)| (page, previous_asking))
+        .collect();
+    let parts = crate::watch::parts_written(&pages);
+    let pages: Vec<(usize, u16)> = pages
+        .iter()
+        .zip(parts)
+        .map(|(&(page, _), parts)| (page, parts))
+        .collect();
+    dirty_part_ranges(start, size, &pages)
+}
+
 /// [`upload`] of the levels from `first` on, the ones a view shows: of a
 /// texture the title placed there may be no memory of the larger ones, and
 /// what lies there is another texture's. (After victory-amd 4436f8f1.)
