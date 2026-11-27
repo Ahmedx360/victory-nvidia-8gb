@@ -110,6 +110,10 @@ references merge their selected indices before the flush, and dependent host
 callbacks run after the refresh. First uploads, one-shot bakes and on-demand
 residency transitions still copy all subresources.
 
+For same-build A/B runs, set `VICTORY_SHADOW_DIRECT_READ=0` to disable
+those direct reads, or `VICTORY_SHADOW_BACK_PARALLEL=0` to force serial
+shader copy-back. Both are enabled by default and are read once at first use.
+
 Large title-buffer shadow refreshes also try direct reads in bounded
 4 MiB chunks. A chunk is read in place only while the mapping lock is acquired
 without waiting and all its pages are readable; otherwise it uses the guarded
