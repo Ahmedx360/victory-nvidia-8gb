@@ -1528,19 +1528,36 @@ impl Staging {
             return 0;
         }
         if !alone && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false)) {
-            if !exact && last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
+            let before = last.asked;
+            if !exact && before != 0 && written.iter().all(|&(_, asking)| asking <= before) {
                 return 0;
             }
             last.asked = now;
-            // Read through the copy, which stands unmapped pages: memory of
-            // big pools is too slow to ask page by page.
-            with_read(size, |read| {
-                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                self.detile(read);
-            });
+            // The first read and one-shot bakes need a complete staging fill.
+            // Later writes only re-read affected mip/slice extents. No second
+            // per-texture copy of the tiled allocation is retained.
+            let read = if exact || before == 0 {
+                with_read(size, |read| {
+                    crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+                    self.detile(read);
+                });
+                size
+            } else {
+                let changed = dirty_page_ranges(start, size, before, &written);
+                if changed.is_empty() {
+                    // An incomplete dirty map must not leave a changed texture stale.
+                    with_read(size, |read| {
+                        crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+                        self.detile(read);
+                    });
+                    size
+                } else {
+                    self.refresh_changed(size, &changed)
+                }
+            };
             #[cfg(feature = "diagnostics")]
-            crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
-            return size;
+            crate::copystat::add(crate::copystat::C::TexWatched, read as u64);
+            return read;
         }
         // View memory has no write-watch, and a texture there was hashed
         // whole at every check: 229 MB and 51 ms a frame in a gameplay view
