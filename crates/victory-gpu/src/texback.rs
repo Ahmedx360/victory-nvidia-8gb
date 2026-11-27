@@ -277,21 +277,12 @@ pub(crate) fn land(back: &Back) {
     // allocation on every shader-written texture readback.
     let in_place = back.can_tile_in_place() && crate::texture::committed(at as *const u8, size);
     let mut scratch = (!in_place).then(|| vec![0u8; size]);
-    let tiled: &mut [u8] = if in_place {
-        crate::watch::writing(at, size);
-        // SAFETY: the mapping read lock and ticket lock are held, and
-        // committed() verified the whole allocation before the mutable view.
-        unsafe { std::slice::from_raw_parts_mut(at as *mut u8, size) }
-    } else {
-        let Some(tiled) = scratch.as_mut() else {
-            return;
-        };
+    if let Some(tiled) = scratch.as_mut() {
         // Keep title bytes the subresources do not cover.
         if !crate::host::read_into(at as *const u8, tiled) {
             return;
         }
-        tiled
-    };
+    }
     let mut data = std::ptr::null_mut();
     // SAFETY: our read-back buffer, written by the list that has run.
     unsafe {
@@ -299,6 +290,20 @@ pub(crate) fn land(back: &Back) {
             return;
         }
     }
+    let tiled: &mut [u8] = if in_place {
+        crate::watch::writing(at, size);
+        // SAFETY: the mapping read lock and ticket lock are held, and
+        // committed() verified the whole allocation before the mutable view.
+        unsafe { std::slice::from_raw_parts_mut(at as *mut u8, size) }
+    } else {
+        let Some(tiled) = scratch.as_mut() else {
+            // The branch is unreachable, but do not dereference a null pointer
+            // if the in-place decision ever changes alongside this code.
+            unsafe { back.buffer.Unmap(0, None) };
+            return;
+        };
+        tiled
+    };
     for (i, (footprint, &rows)) in back.footprints.iter().zip(&back.rows).enumerate() {
         let (mip, slice) = (i as u32 % back.mips, i as u32 / back.mips);
         let f = footprint.Footprint;
