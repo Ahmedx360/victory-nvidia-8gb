@@ -141,6 +141,11 @@ hardware.
   pressure at 5 GiB free physical memory and uses tighter 16/4 MiB per-frame
   admission caps in pressure/critical states.
 
+- Large shadow-buffer refreshes now try a bounded 4 MiB direct read when
+  the title mapping lock is immediately available and every source page in
+  that chunk is readable. Busy remapping or any missing page falls back to
+  the existing guarded kernel copy. Direct and kernel bytes are reported
+  separately, so the target run can show whether this path actually applies.
 - Shader-written buffer copy-back reuses per-thread title/original-byte
   scratch across pieces and vectorizes the three-way GPU/title/snapshot merge
   with AVX2 on supported CPUs. Eight or more ordered, non-overlapping 64 KiB
