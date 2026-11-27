@@ -1548,6 +1548,28 @@ impl Staging {
             return size;
         }
 
+        // Fully committed texture memory can be read directly while the
+        // runtime's mapping lock is held. Try the lock without waiting; if
+        // streaming is remapping or any page is absent, use the safe kernel
+        // copy path below instead.
+        let read_in_place = {
+            let mapped = crate::watch::title_memory_reading_now();
+            if let Some(_mapped) = mapped
+                && committed(self.memory, size)
+            {
+                // SAFETY: the mapping read lock is held and every byte is
+                // committed for the duration of the detile.
+                let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
+                self.detile_selected(tiled, Some(&selected));
+                true
+            } else {
+                false
+            }
+        };
+        if read_in_place {
+            return 0;
+        }
+
         with_read(size, |read| {
             for range in &ranges {
                 // SAFETY: extents are clipped to this staging range at creation.
