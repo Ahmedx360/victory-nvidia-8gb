@@ -3386,9 +3386,11 @@ impl Shadow {
             // Invalidate kept snapshot pieces before dispatching work. The
             // changed spans are disjoint 64 KiB title-memory blocks, so each
             // worker can read/merge/write its own block without racing another.
-            for &(at, n) in &differing {
-                self.changed(at, at + n);
-            }
+            let changed_ranges: Vec<(usize, usize)> = differing
+                .iter()
+                .map(|&(at, n)| (at, at + n))
+                .collect();
+            self.changed_many(&changed_ranges);
 
             let disjoint = differing
                 .windows(2)
@@ -3687,6 +3689,27 @@ impl Shadow {
         }
         for piece in self.pieces(from, to) {
             kept.0[piece] = false;
+        }
+    }
+
+    /// Invalidate several already-found changed ranges under one kept-table
+    /// lock. Copy-back can report thousands of 64 KiB pieces in a frame; the
+    /// ranges are disjoint, so taking this lock once avoids per-piece
+    /// synchronization without changing which snapshot bits are cleared.
+    fn changed_many(&self, ranges: &[(usize, usize)]) {
+        if !keeps() || ranges.is_empty() {
+            return;
+        }
+        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.0.is_empty() {
+            return;
+        }
+        for &(from, to) in ranges {
+            if from < to {
+                for piece in self.pieces(from, to) {
+                    kept.0[piece] = false;
+                }
+            }
         }
     }
 
