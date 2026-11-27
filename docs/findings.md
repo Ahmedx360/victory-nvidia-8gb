@@ -141,10 +141,13 @@ hardware.
   pressure at 5 GiB free physical memory and uses tighter 16/4 MiB per-frame
   admission caps in pressure/critical states.
 
-- Shader-written buffer copy-back now reuses its old-title scratch buffer
-  across differing 64 KiB pieces and vectorizes the three-way GPU/title/snapshot
-  merge with AVX2 on supported CPUs. It retains the scalar fallback and the
-  same byte-selection rule; this is not a change to the merge semantics.
+- Shader-written buffer copy-back reuses per-thread title/original-byte
+  scratch across pieces and vectorizes the three-way GPU/title/snapshot merge
+  with AVX2 on supported CPUs. Eight or more ordered, non-overlapping 64 KiB
+  pieces are merged on the persistent workers; smaller or uncertain piece
+  lists stay serial. The write guards and conditional dword writer remain in
+  place, and the GPU/title byte-selection rule is unchanged. The frame summary
+  reports how many pieces used the parallel path.
 
 Compare the same title, save, scene, resolution and driver before and after.
 Record memory-census private commit and working set, texture staging bytes,
