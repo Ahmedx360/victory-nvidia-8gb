@@ -2369,6 +2369,47 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
 }
 
 #[cfg(test)]
+mod dirty_range_tests {
+    use super::{coalesce_ranges, dirty_part_ranges, ranges_overlap};
+    use std::ops::Range;
+
+    #[test]
+    fn dirty_subpages_are_clipped_to_texture_boundaries() {
+        let start = crate::watch::PAGE + crate::watch::KERNEL_PAGE;
+        let size = crate::watch::PAGE + 3 * crate::watch::KERNEL_PAGE;
+        let pages = [
+            (1, (1 << 1) | (1 << 3)),
+            (2, (1 << 0) | (1 << 2)),
+        ];
+        assert_eq!(
+            dirty_part_ranges(start, size, &pages),
+            vec![
+                0..crate::watch::KERNEL_PAGE,
+                2 * crate::watch::KERNEL_PAGE..3 * crate::watch::KERNEL_PAGE,
+                crate::watch::PAGE - crate::watch::KERNEL_PAGE..crate::watch::PAGE,
+                crate::watch::PAGE + crate::watch::KERNEL_PAGE..size,
+            ]
+        );
+    }
+
+    #[test]
+    fn subresource_overlap_requires_a_shared_byte() {
+        let extents = [10..20, 40..50];
+        assert!(ranges_overlap(&extents, &[15..16]));
+        assert!(ranges_overlap(&extents, &[0..11, 48..60]));
+        assert!(!ranges_overlap(&extents, &[20..40]));
+        assert!(!ranges_overlap(&extents, &[0..10, 20..40, 50..70]));
+        assert!(!ranges_overlap(&extents, &[]));
+    }
+
+    #[test]
+    fn overlapping_or_adjacent_extents_are_read_once() {
+        let ranges: Vec<Range<usize>> = vec![20..30, 0..10, 10..15, 28..40, 50..60];
+        assert_eq!(coalesce_ranges(ranges), vec![0..15, 20..40, 50..60]);
+    }
+}
+
+#[cfg(test)]
 mod title_memory_tests {
     use super::with_title;
 
