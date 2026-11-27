@@ -2401,7 +2401,7 @@ enum Step {
     GpuWrite(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Brings a texture's staging buffer up to date: once per submission,
     /// whichever lists sample it, until a `Copy` or `Run` intervenes.
-    Texture(std::sync::Arc<crate::texture::Staging>),
+    Texture(std::sync::Arc<crate::texture::Staging>, Vec<usize>),
     /// Reads a CPU-written linear movie plane into a per-list upload buffer.
     Plane((usize, usize), Box<dyn Fn() + Send>),
     /// A title buffer copy that the list does on the card ([`place`]): what
@@ -3169,7 +3169,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                         return Some(WHY_READ);
                     }
                 }
-                Step::Texture(staging) => {
+                Step::Texture(staging, _) => {
                     let (at, len) = staging.memory();
                     if touches(written, at, at + len) {
                         if count {
@@ -7548,7 +7548,17 @@ impl HostList {
     /// Brings a texture's staging buffer up to date when the list is
     /// submitted, keeping it alive until the list is reset.
     pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>) {
-        self.deferred().copies.push(Step::Texture(staging));
+        self.deferred().copies.push(Step::Texture(staging, Vec::new()));
+    }
+
+    /// Defers a staging refresh and acknowledges only subresources whose GPU
+    /// copy commands were recorded by this list.
+    pub(crate) fn defer_texture_upload(
+        &self,
+        staging: std::sync::Arc<crate::texture::Staging>,
+        upload_indices: Vec<usize>,
+    ) {
+        self.deferred().copies.push(Step::Texture(staging, upload_indices));
     }
 
     /// A copy source owned exclusively by this list until reset after its
@@ -7677,12 +7687,22 @@ impl HostList {
                     }
                     continue;
                 }
-                Step::Texture(staging) => {
+                Step::Texture(staging, upload_indices) => {
                     if batch.texture_due(staging) {
-                        batch.due.push(staging.clone());
-                        if !wide_textures() {
-                            batch.refresh_textures();
+                        batch.due.push((staging.clone(), upload_indices.clone()));
+                    } else if let Some((_, queued)) = batch
+                        .due
+                        .iter_mut()
+                        .find(|(due, _)| std::sync::Arc::ptr_eq(due, staging))
+                    {
+                        for &index in upload_indices {
+                            if !queued.contains(&index) {
+                                queued.push(index);
+                            }
                         }
+                    }
+                    if !wide_textures() {
+                        batch.refresh_textures();
                     }
                     continue;
                 }
@@ -7927,7 +7947,7 @@ struct Batch {
     /// or due to be.
     textures: std::collections::HashSet<usize>,
     /// Those due ([`Batch::refresh_textures`]).
-    due: Vec<std::sync::Arc<crate::texture::Staging>>,
+    due: Vec<(std::sync::Arc<crate::texture::Staging>, Vec<usize>)>,
     /// What copies at their place in the submission's lists put into title
     /// memory ([`place`]): the host copy, the title address, the bytes.
     placed: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, Vec<u8>)>,
@@ -8239,7 +8259,8 @@ impl Batch {
     /// submission beginning at each of `parts`.
     fn refresh_front(&mut self, runs: &[&HostList], parts: &[usize]) {
         let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
-        let mut due = Vec::new();
+        let mut due: Vec<(std::sync::Arc<crate::texture::Staging>, Vec<usize>)> = Vec::new();
+        let mut due_indices: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
         let mut touches = Vec::new();
         for (n, list) in runs.iter().enumerate() {
             if parts.contains(&n) {
@@ -8257,9 +8278,18 @@ impl Batch {
                         touches.push(Touch::Refresh(key, *at, *at + *len));
                     }
                     Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
-                    Step::Texture(staging) if wide_textures() => {
+                    Step::Texture(staging, upload_indices) if wide_textures() => {
+                        let key = std::sync::Arc::as_ptr(staging) as usize;
                         if self.texture_due(staging) {
-                            due.push(staging.clone());
+                            due_indices.insert(key, due.len());
+                            due.push((staging.clone(), upload_indices.clone()));
+                        } else if let Some(&index) = due_indices.get(&key) {
+                            let queued = &mut due[index].1;
+                            for &subresource in upload_indices {
+                                if !queued.contains(&subresource) {
+                                    queued.push(subresource);
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -8304,7 +8334,9 @@ impl Batch {
         crate::shadow::wide_each(spans.len() + due.len(), move |i| {
             // The textures first: they are the longer pieces.
             let Some(i) = i.checked_sub(due.len()) else {
-                due[i].refresh();
+                let (staging, upload_indices) = &due[i];
+                staging.refresh();
+                staging.acknowledge_uploads(upload_indices);
                 return;
             };
             let (shadow, from, to) = &spans[i];
@@ -8406,7 +8438,10 @@ impl Batch {
     /// The textures due are brought up to date.
     fn refresh_textures(&mut self) {
         if self.due.len() < 2 || !wide_textures() {
-            self.due.drain(..).for_each(|staging| staging.refresh());
+            self.due.drain(..).for_each(|(staging, upload_indices)| {
+                staging.refresh();
+                staging.acknowledge_uploads(&upload_indices);
+            });
             return;
         }
         let _textures = crate::timeline::span("textures brought up to date");
@@ -8414,7 +8449,11 @@ impl Batch {
         let started = std::time::Instant::now();
         let before = PREPARING[2].load(Ordering::Relaxed);
         let due = std::mem::take(&mut self.due);
-        crate::shadow::wide_each(due.len(), move |i| due[i].refresh());
+        crate::shadow::wide_each(due.len(), move |i| {
+            let (staging, upload_indices) = &due[i];
+            staging.refresh();
+            staging.acknowledge_uploads(upload_indices);
+        });
         let summed = PREPARING[2].load(Ordering::Relaxed).saturating_sub(before);
         PREPARING[2].fetch_sub(summed.saturating_sub(started.elapsed().as_micros() as u64), Ordering::Relaxed);
     }
