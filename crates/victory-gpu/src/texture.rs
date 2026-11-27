@@ -1122,7 +1122,13 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         && !staging.dirty.load(Relaxed)
     {
         #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::TexSkipped, 1);
+        {
+            crate::copystat::add(crate::copystat::C::TexSkipped, 1);
+            crate::copystat::add(
+                crate::copystat::C::TexCopySkippedSubresources,
+                staging.footprints.len() as u64,
+            );
+        }
         list.defer_texture(staging);
         return;
     }
@@ -1222,6 +1228,19 @@ fn record_upload(
         unsafe { list.list.ResourceBarrier(&[aliasing]) };
     }
     crate::list::ensure_state(list, resource, COPY_DEST);
+    // Count actual D3D12 texture-copy regions, not just texture upload
+    // records. This makes partial-copy savings visible in diagnostics.
+    #[cfg(feature = "diagnostics")]
+    {
+        crate::copystat::add(
+            crate::copystat::C::TexCopySubresources,
+            upload_indices.len() as u64,
+        );
+        crate::copystat::add(
+            crate::copystat::C::TexCopyOmittedSubresources,
+            staging.footprints.len().saturating_sub(upload_indices.len()) as u64,
+        );
+    }
     // The staging/plane upload buffer lives until the list is reset.
     for &i in upload_indices {
         let footprint = &staging.footprints[i];
