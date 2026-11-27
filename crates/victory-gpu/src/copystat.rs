@@ -93,6 +93,10 @@ pub(crate) enum C {
     TexCopyOmittedSubresources,
     TexCopySkippedSubresources,
     TexSkipped,
+    /// Shader-written texture readbacks landed directly into title memory
+    /// or used the compatibility scratch-buffer path.
+    TexBackInPlace,
+    TexBackScratch,
     /// Held submissions a present ran although their waits were not met.
     Forced,
     /// Ranges named through unordered access views by shaders that cannot
@@ -1238,6 +1242,11 @@ pub(crate) fn log(frames: f64) {
         *last = (user, kernel);
         (spent.0 as f64 / 1e3 / frames, spent.1 as f64 / 1e3 / frames)
     };
+    tracing::info!(
+        "texture readbacks per frame: {:.1} landed in place, {:.1} used scratch",
+        c[C::TexBackInPlace as usize] / frames,
+        c[C::TexBackScratch as usize] / frames,
+    );
     tracing::info!(
         "frame account per frame: after a present {:.1} ms until the first list call and {:.1} ms \
          until the first submission; {:.1} ms from the last submission to the present call; \
