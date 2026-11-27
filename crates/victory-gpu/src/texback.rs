@@ -184,7 +184,6 @@ impl Back {
             };
             if pitch < row_bytes
                 || rows != layout_mip.height
-                || f.Width != layout_mip.width
                 || (layout_mip.depth > 1 && depth_pitch < slice_bytes)
                 || f.Depth != layout_mip.depth
             {
