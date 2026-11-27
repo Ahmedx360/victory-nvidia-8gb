@@ -2414,6 +2414,17 @@ mod merge_tests {
                 std::slice::from_raw_parts(destination, LEN),
                 std::slice::from_raw_parts(source, LEN)
             );
+
+            // A remap already in progress makes the try-read fail; the
+            // kernel fallback must still copy the stable current mapping.
+            let changing = crate::watch::title_memory_remapping();
+            assert_eq!(Shadow::copy_title_memory(destination, source, LEN), 0);
+            assert_eq!(
+                std::slice::from_raw_parts(destination, LEN),
+                std::slice::from_raw_parts(source, LEN)
+            );
+            drop(changing);
+
             assert_ne!(
                 VirtualFree(source.cast(), 0, MEM_RELEASE),
                 0
