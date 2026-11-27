@@ -903,9 +903,7 @@ pub(crate) fn digest(bytes: &[u8]) -> Digest {
     Digest(u128::from(low) << 64 | u128::from(high))
 }
 
-/// See [`digest`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) fn pending_upload_versions(
+fn pending_upload_versions(
     dirty: &[std::sync::atomic::AtomicU64],
     uploaded: &[std::sync::atomic::AtomicU64],
 ) -> Vec<(usize, u64)> {
@@ -932,6 +930,8 @@ fn mark_upload_versions(
     }
 }
 
+/// See [`digest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Digest(u128);
 
 /// Merge byte ranges, including ranges that merely touch.
