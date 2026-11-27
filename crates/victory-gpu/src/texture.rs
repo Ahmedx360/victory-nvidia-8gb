@@ -1816,14 +1816,19 @@ impl Staging {
         size
     }
 
-    /// Detiles `tiled` (the texture's memory) into the staging buffer.
+    /// Detiles the whole texture into the staging buffer.
     fn detile(&self, tiled: &[u8]) {
-        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Levels on demand: which levels are the title's is judged here,
-        // once, for what the staging buffer holds from now on. The step
-        // that gives levels their memory goes by this answer.
+        self.detile_selected(tiled, None);
+    }
+
+    /// Detiles only selected staging subresources. A changed on-demand mip
+    /// residency mask invalidates the whole staging image, so that case
+    /// always falls back to a complete detile.
+    fn detile_selected(&self, tiled: &[u8], selected: Option<&[usize]>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.dirty.store(true, Relaxed);
+        let old_held = self.detiled.load(Relaxed);
         let held = if self.on_demand {
-            use std::sync::atomic::Ordering::Relaxed;
             let judged = self.judgement();
             self.judged[0].store(judged[0], Relaxed);
             self.judged[1].store(judged[1], Relaxed);
@@ -1833,8 +1838,10 @@ impl Staging {
         } else {
             u32::MAX
         };
+        let selected = if self.on_demand && old_held != held { None } else { selected };
+
         #[cfg(feature = "diagnostics")]
-        if tiled.iter().all(|&b| b == 0) {
+        if selected.is_none() && tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
                 memory = ?self.memory,
                 desc = ?self.layout.desc,
@@ -1842,6 +1849,9 @@ impl Staging {
             );
         }
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
+            if selected.is_some_and(|indices| !indices.contains(&i)) {
+                continue;
+            }
             let (mip, slice) = self.part(i);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
@@ -1855,7 +1865,6 @@ impl Staging {
                 std::slice::from_raw_parts_mut(self.data.add(footprint.Offset as usize), len)
             };
             if mip < 32 && held & (1 << mip) == 0 {
-                // Not the title's: zeros, not what lies in that memory.
                 linear.fill(0);
                 continue;
             }
