@@ -7701,9 +7701,9 @@ impl HostList {
                             }
                         }
                     }
-                    if !wide_textures() {
-                        batch.refresh_textures();
-                    }
+                    // Keep textures queued until the next batch flush. This lets
+                    // repeated references merge their subresource masks even
+                    // when texture refresh itself runs serially.
                     continue;
                 }
                 Step::Plane((_, len), fill) => {
@@ -8241,8 +8241,8 @@ impl Batch {
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
     }
 
-    /// Whether `staging` is still to be refreshed in this submission (and
-    /// notes it refreshed).
+    /// Whether `staging` has already been queued or refreshed in this
+    /// submission.
     fn texture_due<T>(&mut self, staging: &std::sync::Arc<T>) -> bool {
         self.textures.insert(std::sync::Arc::as_ptr(staging) as *const () as usize)
     }
