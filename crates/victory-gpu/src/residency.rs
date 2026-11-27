@@ -114,6 +114,13 @@ pub(crate) fn limited_host_ram() -> bool {
     *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
 }
 
+/// A tighter admission profile for 16 GiB systems, where a large title's
+/// transient CPU copies compete directly with Windows and the driver.
+fn very_limited_host_ram() -> bool {
+    static LIMITED: OnceLock<bool> = OnceLock::new();
+    *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 16 * GIB))
+}
+
 /// Whether idle memory is trimmed: from when free physical memory falls
 /// under `limit` until it is back above `limit` by an eighth of it (512 MiB
 /// at least), so that storage freed at the line is not made again and freed
@@ -122,13 +129,18 @@ fn next_trim(was: bool, physical: u64, limit: u64) -> bool {
     if was { physical < limit.saturating_add((limit / 8).max(512 * MIB)) } else { physical < limit }
 }
 
-fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
-    // Enter earlier than the old 3/4 GiB cliff so prefetch and in-flight caps
-    // tighten before submit prep starts thrashing (TDR risk around ~3 GiB free).
-    if was {
-        physical < 6 * GIB || commit < 7 * GIB
+fn next_pressure(was: bool, physical: u64, commit: u64, total_physical: u64) -> bool {
+    // A 16 GiB machine must start shedding speculative allocations earlier:
+    // the title, D3D12 driver and Windows share the same physical-memory pool.
+    let (physical_enter, physical_exit) = if total_physical <= 16 * GIB {
+        (5 * GIB, 6 * GIB)
     } else {
-        physical <= 4 * GIB || commit <= 5 * GIB
+        (4 * GIB, 6 * GIB)
+    };
+    if was {
+        physical < physical_exit || commit < 7 * GIB
+    } else {
+        physical <= physical_enter || commit <= 5 * GIB
     }
 }
 
@@ -141,7 +153,7 @@ pub(crate) fn refresh() {
     let trimming = TRIM_IDLE.load(Ordering::Relaxed);
     TRIM_IDLE.store(trim_threshold().is_some_and(|limit| next_trim(trimming, physical, limit)), Ordering::Relaxed);
     let was = pressured();
-    let pressure = next_pressure(was, physical, commit);
+    let pressure = next_pressure(was, physical, commit, status.ullTotalPhys);
     if pressure != was {
         PRESSURED.store(pressure, Ordering::Relaxed);
         if pressure {
@@ -183,23 +195,34 @@ pub(crate) fn critical_commit() -> bool {
     now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) || sample_commit(now) < 1536 * MIB
 }
 
-/// Emergency host-memory state: commit cliff or physical free under 2.5 GiB.
-/// Caps in-flight work and pauses speculative uploads so submit prep cannot
-/// sit for multi-second spans that trip NVIDIA TDR.
+/// Emergency host-memory state. On 16 GiB machines, enter the emergency
+/// path with 3 GiB free rather than waiting for the general 2.5 GiB cliff.
 pub(crate) fn critical() -> bool {
-    critical_commit() || physical_free().is_some_and(|physical| physical < 2560 * MIB)
+    let physical_limit = if very_limited_host_ram() { 3 * GIB } else { 2560 * MIB };
+    critical_commit() || physical_free().is_some_and(|physical| physical < physical_limit)
 }
 
 /// A soft per-frame admission limit. A single texture can cross it. The
 /// queue retains unserved slots so they can be retried on later frames.
-pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
+fn prefetch_limit_for(
+    bytes: u64,
+    pressure: bool,
+    critical: bool,
+    limited: bool,
+    staging: u64,
+    very_limited: bool,
+) -> u64 {
     if critical {
-        bytes.min(8 << 20)
+        bytes.min(if very_limited { 4 << 20 } else { 8 << 20 })
     } else if pressure || (limited && staging >= GIB) {
-        bytes.min(32 << 20)
+        bytes.min(if very_limited { 16 << 20 } else { 32 << 20 })
     } else {
         bytes
     }
+}
+
+pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
+    prefetch_limit_for(bytes, pressure, critical, limited, staging, very_limited_host_ram())
 }
 
 #[cfg(test)]
