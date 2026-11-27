@@ -1836,7 +1836,7 @@ pub(crate) fn back_line(frames: f64) {
 
 #[cfg(test)]
 mod wide_tests {
-    use super::{Job, PIECE, WIDE_JOB, copy_jobs, find_pieces, wide};
+    use super::{Job, PIECE, WIDE_JOB, copy_jobs, find_pieces, wide, wide_each};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1856,6 +1856,27 @@ mod wide_tests {
                 .collect();
             wide(jobs);
             assert_eq!(ran.load(Ordering::Relaxed), n * (n + 1) / 2, "{n} jobs");
+        }
+    }
+
+    /// Every piece index is processed exactly once, and wide_each does
+    /// not return while any worker still has work.
+    #[test]
+    fn wide_each_processes_every_index_before_returning() {
+        for n in [0usize, 1, 2, 7, 300] {
+            let calls = Arc::new(
+                (0..n)
+                    .map(|_| AtomicUsize::new(0))
+                    .collect::<Vec<_>>(),
+            );
+            let worker_calls = calls.clone();
+            wide_each(n, move |i| {
+                worker_calls[i].fetch_add(1, Ordering::Relaxed);
+            });
+            assert!(
+                calls.iter().all(|count| count.load(Ordering::Relaxed) == 1),
+                "{n} work indices must run exactly once"
+            );
         }
     }
 
@@ -1924,10 +1945,10 @@ mod wide_tests {
 /// in the piece, where to), the GPU's bytes are put in and `host` takes the
 /// result. The stretch's offset in the piece and its length if that changed
 /// title memory; none if nothing differs or title memory is not there.
-/// `runs` takes the runs of the stretch (offsets into `title`, lengths)
-/// whose bytes are the GPU's and differ from the title's as read: only
-/// those are to be written, so a title write that lands between the read
-/// and the write elsewhere in the stretch stays (upstream VIctory #2009).
+/// `before` keeps the title bytes as read. The guarded writer later
+/// compares that original stretch with the merged result and stores only
+/// changed dwords, so a title write that lands between the read and write
+/// elsewhere in the stretch is preserved (upstream VIctory #2009).
 thread_local! {
     /// Two reusable buffers for shader-write landing. Each worker holds at
     /// most one 64 KiB title stretch and its original bytes, not one
