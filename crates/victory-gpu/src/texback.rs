@@ -287,6 +287,15 @@ pub(crate) fn land(back: &Back) {
     // This avoids a full-size temporary plus a full read and write of the
     // allocation on every shader-written texture readback.
     let in_place = back.can_tile_in_place() && crate::texture::committed(at as *const u8, size);
+    #[cfg(feature = "diagnostics")]
+    crate::copystat::add(
+        if in_place {
+            crate::copystat::C::TexBackInPlace
+        } else {
+            crate::copystat::C::TexBackScratch
+        },
+        1,
+    );
     let mut scratch = (!in_place).then(|| vec![0u8; size]);
     if let Some(tiled) = scratch.as_mut() {
         // Keep title bytes the subresources do not cover.
