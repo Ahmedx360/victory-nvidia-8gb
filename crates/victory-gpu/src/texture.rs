@@ -1070,22 +1070,31 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
             once!("no upload buffer for a CPU-written movie plane");
             return;
         };
-        record_upload(list, resource, texture, &staging, &source, 0);
+        record_upload(list, resource, texture, &staging, &source, 0, &[0]);
         staging.uploaded.store(true, Relaxed);
         return;
     }
-    // The host texture has the staging buffer's contents: only the check
-    // at submission is left, and what it finds changed the next list that
-    // samples the texture uploads (a frame late where every list of the
-    // frame was recorded before that check). During a one-shot bake we
-    // always record the copy so any change found at submission lands in
-    // VRAM before the bake draw executes.
-    if !baking && staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) {
+    // Refreshes happen after command lists are recorded. Upload only the
+    // subresources whose staging versions were already dirty when recording
+    // began; a later refresh increments their versions and keeps them pending
+    // for the next list.
+    let pending_versions = staging.pending_uploads();
+    let force_all = baking
+        || staging.on_demand
+        || !staging.uploaded.load(Relaxed)
+        || (pending_versions.is_empty() && staging.dirty.load(Relaxed));
+    if !baking && staging.uploaded.load(Relaxed) && pending_versions.is_empty() && !staging.dirty.load(Relaxed) {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexSkipped, 1);
         list.defer_texture(staging);
         return;
     }
+    let upload_versions = if force_all {
+        staging.all_upload_versions()
+    } else {
+        pending_versions
+    };
+    let upload_indices: Vec<usize> = upload_versions.iter().map(|&(index, _)| index).collect();
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::TexUploads, 1);
     if no_wait() && fill_unlocked() {
@@ -1095,15 +1104,24 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         };
         staging.expected.store(there, Relaxed);
     }
-    record_upload(list, resource, texture, &staging, &staging.buffer, staging.base);
-    // When the list is submitted, its copy takes what the staging buffer
-    // holds by then: noted before the check below, which sets `dirty`
-    // again if it detiles (the next list then uploads once more).
+    record_upload(
+        list,
+        resource,
+        texture,
+        &staging,
+        &staging.buffer,
+        staging.base,
+        &upload_indices,
+    );
+    // Versions are acknowledged individually. If a refresh ran after the
+    // snapshot above, its larger version is left pending instead of being
+    // accidentally cleared by this older submission.
     {
         let staging = staging.clone();
         list.defer_host(move || {
+            staging.mark_uploaded(&upload_versions);
             staging.uploaded.store(true, Relaxed);
-            staging.dirty.store(false, Relaxed);
+            staging.dirty.store(!staging.pending_uploads().is_empty(), Relaxed);
         });
     }
     // A host copy that took the place of one with fewer levels: the slots
