@@ -1509,6 +1509,61 @@ impl Staging {
             && self.footprints[0].Footprint.Format == DXGI_FORMAT_R8_UNORM
     }
 
+    /// Refresh the subresources touched by dirty bytes. On-demand tiled
+    /// textures keep the full path because residency changes can alter which
+    /// mip levels belong to the allocation.
+    fn refresh_changed(&self, size: usize, changed: &[Range<usize>]) -> usize {
+        if self.on_demand {
+            with_read(size, |read| {
+                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+                self.detile(read);
+            });
+            return size;
+        }
+
+        let selected: Vec<usize> = self
+            .extents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, extents)| ranges_overlap(extents, changed).then_some(index))
+            .collect();
+        if selected.is_empty() {
+            return 0;
+        }
+
+        let ranges = coalesce_ranges(
+            selected
+                .iter()
+                .flat_map(|&index| self.extents[index].iter().cloned())
+                .collect(),
+        );
+        let bytes: usize = ranges.iter().map(|range| range.end - range.start).sum();
+
+        // A fragmented or near-whole update is cheaper as one safe bulk read.
+        if ranges.len() > 32 || bytes >= size.saturating_mul(3) / 4 {
+            with_read(size, |read| {
+                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+                self.detile(read);
+            });
+            return size;
+        }
+
+        with_read(size, |read| {
+            for range in &ranges {
+                // SAFETY: extents are clipped to this staging range at creation.
+                let (to, from) = unsafe {
+                    (
+                        read.as_mut_ptr().add(range.start),
+                        self.memory.add(range.start),
+                    )
+                };
+                crate::host::copy_mapped(to, from, range.len(), false);
+            }
+            self.detile_selected(read, Some(&selected));
+        });
+        bytes
+    }
+
     /// Returns the bytes of title memory read.
     fn refresh_now(&self) -> usize {
         let whole = std::time::Instant::now();
