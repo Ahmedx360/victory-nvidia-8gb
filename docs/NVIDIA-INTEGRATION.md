@@ -110,6 +110,13 @@ references merge their selected indices before the flush, and dependent host
 callbacks run after the refresh. First uploads, one-shot bakes and on-demand
 residency transitions still copy all subresources.
 
+Large title-buffer shadow refreshes also try direct reads in bounded
+4 MiB chunks. A chunk is read in place only while the mapping lock is acquired
+without waiting and all its pages are readable; otherwise it uses the guarded
+kernel-copy routine. The diagnostics frame summary separates direct bytes from
+kernel-copy bytes. The copy-back path with card verification still uses its
+existing per-piece kernel-read sequence.
+
 Shader-written buffer copy-back reuses per-thread title/original-byte
 scratch and uses a 32-byte AVX2 three-way merge where supported, with a scalar
 fallback for other CPUs and vector tails. Eight or more ordered, disjoint
