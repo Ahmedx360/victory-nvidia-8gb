@@ -141,6 +141,10 @@ hardware.
   pressure at 5 GiB free physical memory and uses tighter 16/4 MiB per-frame
   admission caps in pressure/critical states.
 
+- `VICTORY_SHADOW_DIRECT_READ=0` disables that direct path for same-build
+  A/B comparisons. `VICTORY_SHADOW_BACK_PARALLEL=0` forces the shader
+  copy-back merge to stay serial; both optimizations are enabled by default.
+
 - Large shadow-buffer refreshes now try a bounded 4 MiB direct read when
   the title mapping lock is immediately available and every source page in
   that chunk is readable. Busy remapping or any missing page falls back to
