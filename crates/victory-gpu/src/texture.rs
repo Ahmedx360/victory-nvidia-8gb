@@ -79,6 +79,10 @@ pub(crate) struct Staging {
     /// of 1,120 textures in one frame of run 18.)
     dirty: std::sync::atomic::AtomicBool,
     uploaded: std::sync::atomic::AtomicBool,
+    /// Current CPU-staged content version of each subresource.
+    dirty_versions: Vec<std::sync::atomic::AtomicU64>,
+    /// Latest version of each subresource copied to the GPU.
+    uploaded_versions: Vec<std::sync::atomic::AtomicU64>,
     /// When a list last recorded a use of it (`crate::host::moment`).
     used: std::sync::atomic::AtomicU64,
     /// How many bytes of the texture's memory were mapped when a list last
@@ -1476,8 +1480,43 @@ impl Staging {
         self.parts[i]
     }
 
-    /// The host copy holds what the staging buffer was filled from
-    /// ([`unchanged`]).
+    /// Subresources whose CPU staging content has not yet been copied to
+    /// the GPU. The version snapshot is retained by the submitted list so a
+    /// later refresh cannot be cleared by an older upload callback.
+    fn pending_uploads(&self) -> Vec<(usize, u64)> {
+        self.dirty_versions
+            .iter()
+            .zip(&self.uploaded_versions)
+            .enumerate()
+            .filter_map(|(index, (dirty, uploaded))| {
+                let version = dirty.load(std::sync::atomic::Ordering::Relaxed);
+                let sent = uploaded.load(std::sync::atomic::Ordering::Relaxed);
+                (version != sent).then_some((index, version))
+            })
+            .collect()
+    }
+
+    /// Snapshot every subresource, used for first uploads, one-shot bakes and
+    /// on-demand residency changes which can invalidate the entire texture.
+    fn all_upload_versions(&self) -> Vec<(usize, u64)> {
+        self.dirty_versions
+            .iter()
+            .enumerate()
+            .map(|(index, version)| {
+                (index, version.load(std::sync::atomic::Ordering::Relaxed))
+            })
+            .collect()
+    }
+
+    /// Mark only the exact versions a recorded copy command will transfer.
+    fn mark_uploaded(&self, versions: &[(usize, u64)]) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for &(index, version) in versions {
+            self.uploaded_versions[index].fetch_max(version, Relaxed);
+        }
+    }
+
+    /// The host copy holds what the staging buffer was filled from.
     fn note_held(&self) {
         let hash = self.last.lock().unwrap_or_else(|e| e.into_inner()).hash;
         *self.holds.lock().unwrap_or_else(|e| e.into_inner()) = hash.map(|hash| (self.first, hash));
@@ -2388,6 +2427,12 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         last: Mutex::default(),
         dirty: std::sync::atomic::AtomicBool::new(true),
         uploaded: std::sync::atomic::AtomicBool::new(false),
+        dirty_versions: (0..parts.len())
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect(),
+        uploaded_versions: (0..parts.len())
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect(),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
         expected: std::sync::atomic::AtomicU64::new(0),
         on_demand,
