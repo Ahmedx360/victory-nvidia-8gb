@@ -929,7 +929,7 @@ fn mark_upload_versions(uploaded: &[std::sync::atomic::AtomicU64], versions: &[(
 
 /// See [`digest`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Digest(u128);
+pub(crate) struct Digest(u128);
 
 /// Merge byte ranges, including ranges that merely touch.
 fn coalesce_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
