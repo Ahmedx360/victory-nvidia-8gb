@@ -3,19 +3,19 @@
 ## Older Windows D3D12 runtimes
 
 The integration retains the NVIDIA fork's D3D12 Agility SDK 620 exports.
-`apps/victory/build.rs` downloads Microsoft.Direct3D.D3D12 **1.620.2** from
-NuGet during `cargo build` (MSVC targets) and installs
-`target\<profile>\D3D12\D3D12Core.dll` next to `victory.exe`, verified by
-SHA-256. Keep that `D3D12` folder beside any copied executable.
+apps/victory/build.rs downloads Microsoft.Direct3D.D3D12 **1.620.2** from
+NuGet during cargo build (MSVC targets) and installs
+target\<profile>\D3D12\D3D12Core.dll next to victory.exe, verified by
+SHA-256. Keep that D3D12 folder beside any copied executable.
 
-Skip the fetch with `VICTORY_SKIP_AGILITY_FETCH=1` only when the DLL is
+Skip the fetch with VICTORY_SKIP_AGILITY_FETCH=1 only when the DLL is
 already present. Manual package URL (same bytes build.rs uses):
 
 <https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.620.2/microsoft.direct3d.d3d12.1.620.2.nupkg>
 
-If the log reports `0x887E0003` (`D3D12_ERROR_INVALID_REDIST`), the runtime is
-missing, outside the configured `D3D12` subfolder, or mismatched with SDK 620.
-Delete any stale app-local DLL and rebuild so `build.rs` can reinstall 1.620.2.
+If the log reports 0x887E0003 (D3D12_ERROR_INVALID_REDIST), the runtime is
+missing, outside the configured D3D12 subfolder, or mismatched with SDK 620.
+Delete any stale app-local DLL and rebuild so build.rs can reinstall 1.620.2.
 
 See the [GTX 1660 test notes](docs/HARDWARE-GTX1660.md) for previous results.
 
@@ -25,36 +25,68 @@ Build from this checkout with the pinned Rust toolchain, MSVC C++ Build
 Tools, and the Windows SDK. The launcher selects Series S and the residency
 settings from the RTX build. Use your own title files.
 
-```powershell
+~~~powershell
 cargo build --release --locked -p victory
 $env:VICTORY_GAME_DIR = 'D:\path\to\your\title'
 $env:VICTORY_RUNNER = (Resolve-Path .\target\release\victory.exe).Path
 .\Play-VIctory.cmd pareto-residency
-```
+~~~
 
-The fork's existing `scripts\play-nvidia-8gb.ps1 -Exe <path>` command launches
-the new renderer with Series X at 1080p by default. The `-DropMips` argument
-is accepted for older scripts and emits a warning when given a nonzero value.
+The maintained scripts\play-nvidia-8gb.ps1 -Exe <path> launcher starts
+Series X at 1080p by default. Use -Console series-s or -Console series-x
+to select the emulated console; when omitted, it respects VICTORY_CONSOLE
+and otherwise defaults to Series X.
+
+### Recommended 8 GB laptop preset
+
+For an 8 GB GPU, the optimized launcher layers supported memory-retention
+limits and an optional texture-dimension cap over the maintained NVIDIA
+profile:
+
+~~~powershell
+.\scripts\play-nvidia-8gb-optimized.ps1 -Exe 'D:\path\to\your\title.exe'
+~~~
+
+It defaults to Series X, 1920x1080, reduced *idle* pool retention, non-blocking
+texture refresh, and VICTORY_TEXTURE_MAX_DIM=1024. The texture cap only
+affects eligible tiled 2D title-memory uploads when tiled residency and
+levels-on-demand are available; GPU-written levels can still become resident.
+It can reduce texture detail, and it is an experiment to compare on your title,
+not a measured FPS guarantee. Use -TextureMaxDim 0 to turn it off, or choose
+another cap. Use -NoLowMemory to retain the stock idle-pool limits.
+
+Useful options:
+
+- -Console series-s selects the Series S profile.
+- -NoOverlay removes the F10 overlay from a benchmark.
+- -RamTrimMB 2048 enables idle-memory trimming below the selected free-RAM threshold.
+- -CensusFrames 120 logs a memory census every 120 frames.
+- -WaitForTextureMemory disables the non-blocking texture refresh for an A/B comparison; textures may be delayed less, but streaming stalls can return.
+- -DisableWaitPatching disables the MONITORX/MWAITX instruction patch for troubleshooting only.
+- -NoTelemetry disables reports for that run. Telemetry remains enabled by default unless opted out.
+
+The older -DropMips argument is retained for compatibility; forced mip
+dropping remains experimental and is not the recommended low-VRAM control.
+
 Press F10 to toggle the performance overlay. It starts hidden in pareto
-launches unless `VICTORY_OVERLAY=1` is set. Use `-NoOverlay` or
-`VICTORY_OVERLAY=0` for benchmarks without it. The diagnostics build's
-separate panel is still available on F3.
+launches unless VICTORY_OVERLAY=1 is set. The diagnostics build's separate
+panel is still available on F3.
 
-Set `VICTORY_CONSOLE=series-x` to use Series X with the same launcher.
-`VICTORY_RESOLUTION=1920x1080` caps the recognized resolution ladder.
-For an independent-flip black window, set `VICTORY_WINDOW_PERCENT=88`
-with an explicit `VICTORY_RESOLUTION` or `VICTORY_WINDOW_SIZE`.
-Set `VICTORY_CACHE_DIR` to choose a cache outside the checkout. The
-launcher defaults to `%LOCALAPPDATA%\VIctory\cache-pareto`.
+VICTORY_RESOLUTION=1920x1080 caps the recognized resolution ladder.
+For an independent-flip black window, set VICTORY_WINDOW_PERCENT=88
+with an explicit VICTORY_RESOLUTION or VICTORY_WINDOW_SIZE.
+Set VICTORY_CACHE_DIR to choose a cache outside the checkout. The
+pareto launcher defaults to %LOCALAPPDATA%\VIctory\cache-pareto.
 
 See the [performance comparison and test plan](docs/NVIDIA-INTEGRATION.md).
 
 Every run sends an anonymous performance report (PC specs, driver versions,
-fps timeline) to `https://rxnd.de/vi/v1` so regressions can be compared between
-builds; local copies stay in `%LOCALAPPDATA%\victory\data\telemetry`. It is on
-by default and can be disabled with `VICTORY_TELEMETRY=0`, `[telemetry]
-enabled = false` in `victory.toml`, or `victory run --no-telemetry`. See
-[docs/telemetry.md](docs/telemetry.md) for exactly what is collected.
+fps timeline) to https://rxnd.de/vi/v1 so regressions can be compared between
+builds; local copies stay in %LOCALAPPDATA%\victory\data\telemetry. It is on
+by default and can be disabled with VICTORY_TELEMETRY=0, [telemetry]
+enabled = false in victory.toml, -NoTelemetry, or
+victory run --no-telemetry. See [docs/telemetry.md](docs/telemetry.md)
+for exactly what is collected.
 
 ## Upstream RX 7900 XTX notes
 
@@ -88,10 +120,10 @@ It started at 280 ms a frame in the same scenes two days earlier.
 What is known to be wrong:
 
 - Trees, plants and far buildings flicker outdoors in some places.
-- Rooms with little direct light are too dark without `-RayTracing`.
+- Rooms with little direct light are too dark without -RayTracing.
 - Textures of what just came into view appear late while the title streams.
 - The first run with a new driver or a new build stutters while the driver makes
-  pipelines (`victory warm` makes them ahead).
+  pipelines (victory warm makes them ahead).
 - Recording a frame in the world makes the title's own watchdog end it.
 
 ## How to run it
@@ -100,26 +132,26 @@ You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
 model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
 tools, and your own dump of the title.
 
-```powershell
+~~~powershell
 git clone https://github.com/avatarmanz/VIctory-7900XTX
 cd VIctory-7900XTX
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path of your copy's executable>
-```
+~~~
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+scripts\play.ps1 -Safe leaves out the newest, faster ways; try it first when
+something is wrong. -RayTracing turns the title's ray-traced indirect light on.
 
 Before the first run, ahead of time (both can be stopped and go on later):
 
-```powershell
+~~~powershell
 target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
 target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
-```
+~~~
 
 Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
+[docs/README-fxceless.md](docs/README-fxceless.md). Every VICTORY_... switch is
 described in a comment where it is read.
 
 ## What is different here
@@ -127,14 +159,13 @@ described in a comment where it is read.
 In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
 
 - **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
+  (VICTORY_THIN): eight threads of ours translate them.
+- **Submissions are prepared by a thread of ours and joined** (VICTORY_ASYNC_SUBMIT, VICTORY_JOIN_PARTS), with what can be spread over
   threads spread: refreshes, compares (AVX2), descriptor records, landings.
 - **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
+  changed, on a thread of its own (VICTORY_RELAY, VICTORY_LAND).
 - **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
+  (VICTORY_CARD_STEPS) instead of waiting for it.
 - **The title's writes are caught more cheaply**: one view opened at a fault,
   blocks that rest, places in the title's code that look before they write.
 - **Textures go up on a copy queue of their own** and a slot shows one only after
@@ -147,7 +178,7 @@ In short; the reasons and the measurements are in [docs/findings.md](docs/findin
 ## Credits
 
 This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+commits taken from elsewhere name their source and author.
 
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
   contributors: the loader, the runtime services, the Direct3D 12 back end and
@@ -169,5 +200,5 @@ commits taken from elsewhere name the commit and its author.
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+GPL-3.0-or-later, as VIctory. See LICENSE; the one file that is not
+covered is named in docs/asset-policy.md.
