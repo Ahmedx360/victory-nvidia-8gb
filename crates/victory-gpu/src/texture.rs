@@ -1782,8 +1782,11 @@ impl Staging {
         // texture's address, so the textures take turns.
         // `VICTORY_TEXTURE_GUARD=0` hashes at every check, as before.
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        // The guard saw no write: a change the hash finds came another way.
+        // The guard may miss writes through aliases. Preserve its periodic
+        // whole-texture verification even when ordinary guarded writes also
+        // happened in the same frame.
         let mut blind = false;
+        let mut verify_blind_hash = exact;
         let mut guarded_changes: Option<Vec<Range<usize>>> = None;
         if !alone
             && *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
@@ -1809,6 +1812,7 @@ impl Staging {
                 last.hot_until = frame + HOT_FRAMES;
             }
             let hot = hot_textures() && frame < last.hot_until;
+            verify_blind_hash = exact || turn || hot;
             if !exact && unwritten && !turn && !hot {
                 return 0;
             }
@@ -1877,6 +1881,7 @@ impl Staging {
             return size;
         }
         if !through_copy()
+            && !verify_blind_hash
             && let Some(changed) = guarded_changes.as_deref()
             && committed(self.memory, size)
         {
