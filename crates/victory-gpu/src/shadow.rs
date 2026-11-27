@@ -4424,7 +4424,7 @@ impl Shadow {
                 crate::host::upcheck::note(self.id, a, &was, &self.card_held(a, b - a));
             });
         } else {
-            copy_title_memory(at, from as *const u8, to - from);
+            Self::copy_title_memory(at, from as *const u8, to - from);
         }
         // After the bytes are in: a snapshot taken meanwhile is not current.
         self.changed(from - start, to - start);
