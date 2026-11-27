@@ -1509,15 +1509,34 @@ impl Staging {
             && self.footprints[0].Footprint.Format == DXGI_FORMAT_R8_UNORM
     }
 
+    /// Refresh a complete staging image. Prefer an in-place read while the
+    /// title's mapping lock can be taken immediately; this avoids a
+    /// size-of-texture host scratch allocation for fully committed textures.
+    /// If a mapping is in flight or any page is absent, use the guarded kernel
+    /// copy path, which stands missing pages as zeros.
+    fn refresh_full(&self, size: usize) {
+        let mapped = crate::watch::title_memory_reading_now();
+        if let Some(_mapped) = mapped
+            && committed(self.memory, size)
+        {
+            // SAFETY: the mapping read lock is held and every byte is
+            // committed for the duration of the detile.
+            let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
+            self.detile(tiled);
+        } else {
+            with_read(size, |read| {
+                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+                self.detile(read);
+            });
+        }
+    }
+
     /// Refresh the subresources touched by dirty bytes. On-demand tiled
     /// textures keep the full path because residency changes can alter which
     /// mip levels belong to the allocation.
     fn refresh_changed(&self, size: usize, changed: &[Range<usize>]) -> usize {
         if self.on_demand {
-            with_read(size, |read| {
-                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                self.detile(read);
-            });
+            self.refresh_full(size);
             return size;
         }
 
@@ -1541,10 +1560,7 @@ impl Staging {
 
         // A fragmented or near-whole update is cheaper as one safe bulk read.
         if ranges.len() > 32 || bytes >= size.saturating_mul(3) / 4 {
-            with_read(size, |read| {
-                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                self.detile(read);
-            });
+            self.refresh_full(size);
             return size;
         }
 
@@ -1567,7 +1583,7 @@ impl Staging {
             }
         };
         if read_in_place {
-            return 0;
+            return bytes;
         }
 
         with_read(size, |read| {
@@ -1614,19 +1630,13 @@ impl Staging {
             // Later writes only re-read affected mip/slice extents. No second
             // per-texture copy of the tiled allocation is retained.
             let read = if exact || before == 0 {
-                with_read(size, |read| {
-                    crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                    self.detile(read);
-                });
+                self.refresh_full(size);
                 size
             } else {
                 let changed = dirty_page_ranges(start, size, before, &written);
                 if changed.is_empty() {
                     // An incomplete dirty map must not leave a changed texture stale.
-                    with_read(size, |read| {
-                        crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                        self.detile(read);
-                    });
+                    self.refresh_full(size);
                     size
                 } else {
                     self.refresh_changed(size, &changed)
