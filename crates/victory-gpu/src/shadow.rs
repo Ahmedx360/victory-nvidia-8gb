@@ -1935,27 +1935,28 @@ fn merge_back(
     host: &mut [u8],
     old: &[u8],
     title: &mut [u8],
-    mask: &mut [u8],
+    before: &mut [u8],
 ) -> bool {
     debug_assert_eq!(host.len(), old.len());
     debug_assert_eq!(host.len(), title.len());
-    debug_assert_eq!(host.len(), mask.len());
+    debug_assert_eq!(host.len(), before.len());
     #[cfg(target_arch = "x86_64")]
     if host.len() >= 32 && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the runtime feature check guarantees AVX2 support and the
         // helper uses unaligned loads bounded by the equal-length slices.
-        return unsafe { merge_back_avx2(host, old, title, mask) };
+        return unsafe { merge_back_avx2(host, old, title, before) };
     }
-    merge_back_scalar(host, old, title, mask)
+    merge_back_scalar(host, old, title, before)
 }
 
-fn merge_back_scalar(host: &mut [u8], old: &[u8], title: &mut [u8], mask: &mut [u8]) -> bool {
+fn merge_back_scalar(host: &mut [u8], old: &[u8], title: &mut [u8], before: &mut [u8]) -> bool {
     let mut differs = false;
-    for (((t, h), o), m) in title.iter_mut().zip(host.iter_mut()).zip(old).zip(mask.iter_mut()) {
-        let gpu = if (*h != *o) & (*t == *o) { 0xffu8 } else { 0 };
-        let merged = (*t & !gpu) | (*h & gpu);
-        *m = merged ^ *t;
-        differs |= *m != 0;
+    for (((t, h), o), was) in title.iter_mut().zip(host.iter_mut()).zip(old).zip(before.iter_mut()) {
+        let original = *t;
+        let gpu = if (*h != *o) & (original == *o) { 0xffu8 } else { 0 };
+        let merged = (original & !gpu) | (*h & gpu);
+        *was = original;
+        differs |= merged != original;
         *t = merged;
         *h = merged;
     }
@@ -1970,7 +1971,7 @@ unsafe fn merge_back_avx2(
     host: &mut [u8],
     old: &[u8],
     title: &mut [u8],
-    mask: &mut [u8],
+    before: &mut [u8],
 ) -> bool {
     use std::arch::x86_64::*;
     let mut differs = false;
@@ -1978,15 +1979,15 @@ unsafe fn merge_back_avx2(
     let mut i = 0;
     while i + 32 <= n {
         // SAFETY: each unaligned vector range is inside four equal-length slices.
-        let (gpu, before, current) = unsafe {
+        let (gpu, snapshot, current) = unsafe {
             (
                 _mm256_loadu_si256(host.as_ptr().add(i).cast()),
                 _mm256_loadu_si256(old.as_ptr().add(i).cast()),
                 _mm256_loadu_si256(title.as_ptr().add(i).cast()),
             )
         };
-        let gpu_same = _mm256_cmpeq_epi8(gpu, before);
-        let title_same = _mm256_cmpeq_epi8(current, before);
+        let gpu_same = _mm256_cmpeq_epi8(gpu, snapshot);
+        let title_same = _mm256_cmpeq_epi8(current, snapshot);
         // All-ones where the GPU changed a byte but title memory did not.
         let take_gpu = _mm256_andnot_si256(gpu_same, title_same);
         let merged = _mm256_blendv_epi8(current, gpu, take_gpu);
@@ -1994,7 +1995,7 @@ unsafe fn merge_back_avx2(
         differs |= _mm256_movemask_epi8(changed) != 0;
         // SAFETY: destinations cover the same in-bounds vector range.
         unsafe {
-            _mm256_storeu_si256(mask.as_mut_ptr().add(i).cast(), changed);
+            _mm256_storeu_si256(before.as_mut_ptr().add(i).cast(), current);
             _mm256_storeu_si256(title.as_mut_ptr().add(i).cast(), merged);
             _mm256_storeu_si256(host.as_mut_ptr().add(i).cast(), merged);
         }
@@ -2004,23 +2005,22 @@ unsafe fn merge_back_avx2(
         &mut host[i..],
         &old[i..],
         &mut title[i..],
-        &mut mask[i..],
+        &mut before[i..],
     )
 }
 
-/// mask is scratch.
+/// Merge just the bytes that changed, retaining the original title values
+/// for the guarded compare-and-write that follows.
 fn back_piece(
     host: &mut [u8],
     old: &[u8],
     title: &mut Vec<u8>,
-    mask: &mut Vec<u8>,
-    runs: &mut Vec<(usize, usize)>,
+    before: &mut Vec<u8>,
     read: impl FnOnce(usize, &mut [u8]) -> bool,
 ) -> Option<(usize, usize)> {
-    runs.clear();
     // From the first byte that differs to the last: title memory is read
     // and written there only (a shader that sets a few words of a piece
-    // cost a read, a walk and a write of all 64 KiB of it).
+    // cost a read, a merge and a write of all 64 KiB of it).
     let first = first_difference(host, old)?;
     let last = last_difference(host, old).unwrap_or(first);
     let n = last + 1 - first;
@@ -2030,34 +2030,10 @@ fn back_piece(
     if !read(first, title) {
         return None;
     }
-    // Title memory with the GPU's bytes put in; the copy takes the title's
-    // bytes in turn.
-    // Without a branch, so the loop runs many bytes at a time: the GPU's
-    // byte where the copy's byte is not what it was before the submission
-    // and the title left its byte as it was, else the title's. (With the
-    // two searches above this was 44 ms a frame for 970 pieces.)
-    // Where the shader and the title both changed a byte while the GPU ran,
-    // the title's stays: the shader computed its byte from the copy's older
-    // data (one cleared a bit of a record the title had already replaced,
-    // and copying it back broke the title's object: an access violation
-    // through 0xffffffff00000000; PalmVIDev e0b70476, VIctory f39c6c2).
-    mask.clear();
-    mask.resize(n, 0);
-    if !merge_back(host, old, title, mask) {
+    before.clear();
+    before.resize(n, 0);
+    if !merge_back(host, old, title, before) {
         return None;
-    }
-    let mut i = 0;
-    while i < n {
-        while i < n && mask[i] == 0 {
-            i += 1;
-        }
-        let start = i;
-        while i < n && mask[i] != 0 {
-            i += 1;
-        }
-        if i > start {
-            runs.push((start, i - start));
-        }
     }
     Some((first, n))
 }
@@ -2397,14 +2373,18 @@ mod merge_tests {
                     .map(|(i, &b)| if (i + phase * 7).is_multiple_of(23) { b ^ 0xa5 } else { b })
                     .collect();
                 let (mut host_scalar, mut title_scalar) = (host.clone(), title.clone());
-                let (mut mask, mut mask_scalar) = (vec![0; len], vec![0; len]);
-                let vector_changed = merge_back(&mut host, &old, &mut title, &mut mask);
-                let scalar_changed =
-                    merge_back_scalar(&mut host_scalar, &old, &mut title_scalar, &mut mask_scalar);
+                let (mut before, mut before_scalar) = (vec![0; len], vec![0; len]);
+                let vector_changed = merge_back(&mut host, &old, &mut title, &mut before);
+                let scalar_changed = merge_back_scalar(
+                    &mut host_scalar,
+                    &old,
+                    &mut title_scalar,
+                    &mut before_scalar,
+                );
                 assert_eq!(vector_changed, scalar_changed, "len={len} phase={phase}");
                 assert_eq!(host, host_scalar, "host len={len} phase={phase}");
                 assert_eq!(title, title_scalar, "title len={len} phase={phase}");
-                assert_eq!(mask, mask_scalar, "mask len={len} phase={phase}");
+                assert_eq!(before, before_scalar, "before len={len} phase={phase}");
             }
         }
     }
@@ -2428,19 +2408,19 @@ mod merge_tests {
                 .map(|(i, &b)| if i % 17 == 0 { b ^ 0x33 } else { b })
                 .collect();
             let (mut reference_host, mut reference_title) = (host.clone(), title.clone());
-            let (mut mask, mut reference_mask) = (vec![0; len], vec![0; len]);
+            let (mut before, mut reference_before) = (vec![0; len], vec![0; len]);
             // SAFETY: the test returns early without AVX2; slices all have len bytes.
-            let got = unsafe { super::merge_back_avx2(&mut host, &old, &mut title, &mut mask) };
+            let got = unsafe { super::merge_back_avx2(&mut host, &old, &mut title, &mut before) };
             let expected = merge_back_scalar(
                 &mut reference_host,
                 &old,
                 &mut reference_title,
-                &mut reference_mask,
+                &mut reference_before,
             );
             assert_eq!(got, expected);
             assert_eq!(host, reference_host);
             assert_eq!(title, reference_title);
-            assert_eq!(mask, reference_mask);
+            assert_eq!(before, reference_before);
         }
     }
 
@@ -2461,33 +2441,33 @@ mod merge_tests {
             host[at] ^= 0x33;
         }
         let gpu = host.clone();
-        let mut scratch = Vec::new();
-        let (mut mask, mut runs) = (Vec::new(), Vec::new());
+        let (mut scratch, mut before) = (Vec::new(), Vec::new());
         let mut asked = None;
         let read = |first: usize, into: &mut [u8]| {
             asked = Some((first, into.len()));
             into.copy_from_slice(&title_memory[first..first + into.len()]);
             true
         };
-        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut mask, &mut runs, read), Some((5, 5)));
+        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut before, read), Some((5, 5)));
         assert_eq!(asked, Some((5, 5)));
         let mut wanted = title_memory[5..10].to_vec();
         wanted[0] = gpu[5];
         wanted[4] = gpu[9];
         assert_eq!(scratch, wanted);
         assert_eq!(host[5..10], wanted);
-        // Only the GPU's two bytes are written back (upstream #2009).
-        assert_eq!(runs, [(0, 1), (4, 1)]);
+        assert_eq!(before, title_memory[5..10]);
+        // Only the GPU's two bytes differ from the saved title bytes.
+        assert_eq!(changed_runs(&scratch, &before), [(0, 1), (4, 1)]);
         // The copy outside the stretch is left as it was.
         assert!(host[..5] == gpu[..5] && host[10..] == gpu[10..]);
         assert!(scratch.capacity() < PIECE / 2, "scratch of {} bytes for a stretch of 5", scratch.capacity());
 
         // Nothing differs: title memory is not read.
         let mut same = old.clone();
-        assert_eq!(back_piece(&mut same, &old, &mut scratch, &mut mask, &mut runs, |_, _| unreachable!()), None);
+        assert_eq!(back_piece(&mut same, &old, &mut scratch, &mut before, |_, _| unreachable!()), None);
         // Title memory not there: nothing to write, the copy unchanged.
         let mut host = gpu.clone();
-        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut mask, &mut runs, |_, _| false), None);
+        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut before, |_, _| false), None);
         assert!(host == gpu);
         // The GPU wrote what the title holds already: nothing to write.
         let mut title_memory = old.clone();
@@ -2498,11 +2478,12 @@ mod merge_tests {
             into.copy_from_slice(&title_memory[first..first + into.len()]);
             true
         };
-        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut mask, &mut runs, read), None);
-        // A whole piece changed: the scratch grows to it.
+        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut before, read), None);
+        // A whole piece changed: both reusable buffers grow to the stretch.
         let mut host: Vec<u8> = old.iter().map(|b| !b).collect();
-        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut mask, &mut runs, |_, into| into.len() == PIECE), Some((0, PIECE)));
+        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut before, |_, into| into.len() == PIECE), Some((0, PIECE)));
         assert_eq!(scratch.len(), PIECE);
+        assert_eq!(before.len(), PIECE);
     }
 
     /// A byte the shader and the title both changed while the GPU ran keeps
@@ -2519,15 +2500,16 @@ mod merge_tests {
         let mut title_memory = old.clone();
         title_memory[3] = 44;
         title_memory[5] = 66; // the title alone
-        let (mut scratch, mut mask, mut runs) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut scratch, mut before) = (Vec::new(), Vec::new());
         let read = |first: usize, into: &mut [u8]| {
             into.copy_from_slice(&title_memory[first..first + into.len()]);
             true
         };
-        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut mask, &mut runs, read), Some((1, 4)));
+        assert_eq!(back_piece(&mut host, &old, &mut scratch, &mut before, read), Some((1, 4)));
         assert_eq!(scratch, [20, 3, 44, 50], "the title's byte where both changed");
+        assert_eq!(before, [2, 3, 44, 5], "the original title values are retained");
         assert_eq!(host[1..5], [20, 3, 44, 50], "the copy takes the result");
-        assert_eq!(runs, [(0, 1), (3, 1)], "the GPU's bytes only");
+        assert_eq!(changed_runs(&scratch, &before), [(0, 1), (3, 1)], "the GPU's bytes only");
     }
 
 
@@ -3380,24 +3362,19 @@ impl Shadow {
             // Sized to each stretch read (`back_piece`): a zeroed 64 KiB per
             // range, most of whose ranges differ nowhere, was most of the
             // work for small ranges.
-            let (mut title, mut mask, mut runs, mut was) =
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (mut title, mut was) = (Vec::new(), Vec::new());
             for (at, n) in differing {
                 // SAFETY: inside the mapping; only the submitting thread
                 // writes it.
                 let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                 let old = &before[at - from..at - from + n];
                 let read = |first: usize, title: &mut [u8]| crate::host::read_into((start + at + first) as *const u8, title);
-                let Some((first, n)) = back_piece(host, old, &mut title, &mut mask, &mut runs, read) else {
+                let Some((first, n)) = back_piece(host, old, &mut title, &mut was, read) else {
                     continue;
                 };
-                // Title memory as read, beside it with the card's bytes put
-                // in: only the dwords that differ are written.
-                was.clear();
-                was.extend(title.iter().zip(&mask).map(|(now, changed)| now ^ changed));
-                if !runs.is_empty() {
-                    written += put_changed(start + at + first, &was[..n], &title[..n]);
-                }
+                // The merge saved the original title bytes in was. The guarded
+                // writer performs the exact changed-dword scan before storing.
+                written += put_changed(start + at + first, &was[..n], &title[..n]);
             }
             // Our write shows as a title write at the copy's next refresh,
             // which copies those pages once more (some dozens of MB a
