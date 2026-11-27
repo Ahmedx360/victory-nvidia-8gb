@@ -114,11 +114,15 @@ hardware.
   committed, the refresh reads in place. If the title is remapping or pages
   are missing, it falls back to the guarded kernel copy and keeps missing bytes
   zero-filled.
-- D3D12 texture copies are now recorded only for subresources whose CPU-staged
-  version has not yet been copied to the GPU. Each list acknowledges the exact
-  versions captured when it recorded commands; a newer refresh remains pending
-  instead of being cleared by an older callback. First uploads, bakes and
-  on-demand residency transitions still copy every subresource.
+- D3D12 texture copies are recorded only for subresources selected by
+  the draw's staging versions. The selected indices travel with the deferred
+  texture step; once the batch has refreshed staging (serially or in parallel),
+  it acknowledges only those selected subresources. Repeated references merge
+  their selections before the flush, while a later refresh increments its
+  version after acknowledgement and stays pending for the next upload.
+  First uploads, bakes and on-demand residency transitions still copy every
+  subresource. Host callbacks that depend on the refreshed staging are ordered
+  after that flush.
 - Large per-thread texture read scratch is no longer retained without limit:
   the default retained buffer is 16 MiB on hosts with at most 32 GiB RAM and
   64 MiB on larger hosts. `VICTORY_TEXTURE_READ_CACHE_MB` changes the limit;
