@@ -2539,9 +2539,7 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
             let ranges = coalesce_ranges(ranges);
             if ranges.is_empty() {
                 // Unknown layouts must stay on the safe full-refresh path.
-                let mut full = Vec::with_capacity(1);
-                full.push(0..read);
-                full
+                Vec::from([0..read])
             } else {
                 ranges
             }
