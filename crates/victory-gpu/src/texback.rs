@@ -138,6 +138,65 @@ impl Back {
     pub(crate) fn range(&self) -> (usize, usize) {
         (self.ticket.at, self.ticket.end)
     }
+
+    /// Verify the exact bounds checked by Layout::tile before allowing it to
+    /// write directly into title memory. This keeps the old all-or-nothing
+    /// behavior if a footprint or layout is inconsistent.
+    fn can_tile_in_place(&self) -> bool {
+        for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
+            let mip = i as u32 % self.mips;
+            let slice = i as u32 / self.mips;
+            if self.layout.extents(mip, slice).is_err() {
+                return false;
+            }
+            let Some(layout_mip) = self.layout.mips.get(mip as usize) else {
+                return false;
+            };
+            let f = footprint.Footprint;
+            let pitch = f.RowPitch as usize;
+            let rows = rows as usize;
+            let depth_pitch = match pitch.checked_mul(rows) {
+                Some(value) => value,
+                None => return false,
+            };
+            let row_bytes = match (layout_mip.width as usize)
+                .checked_mul(self.layout.desc.element_bytes as usize)
+            {
+                Some(value) => value,
+                None => return false,
+            };
+            let slice_bytes = match (layout_mip.height as usize)
+                .checked_sub(1)
+                .and_then(|height| height.checked_mul(pitch))
+                .and_then(|offset| offset.checked_add(row_bytes))
+            {
+                Some(value) => value,
+                None => return false,
+            };
+            if pitch < row_bytes
+                || (layout_mip.depth > 1 && depth_pitch < slice_bytes)
+                || f.Depth != layout_mip.depth
+            {
+                return false;
+            }
+            let need = match (layout_mip.depth as usize)
+                .checked_sub(1)
+                .and_then(|depth| depth.checked_mul(depth_pitch))
+                .and_then(|offset| offset.checked_add(slice_bytes))
+            {
+                Some(value) => value,
+                None => return false,
+            };
+            let linear_len = match depth_pitch.checked_mul(f.Depth as usize) {
+                Some(value) => value,
+                None => return false,
+            };
+            if linear_len < need {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Records a host copy from a texture already in COPY_SOURCE.
@@ -212,11 +271,27 @@ pub(crate) fn land(back: &Back) {
     }
     let (at, end) = back.range();
     let size = end - at;
-    let mut tiled = vec![0u8; size];
-    // Keep title bytes the subresources do not cover.
-    if !crate::host::read_into(at as *const u8, &mut tiled) {
-        return;
-    }
+    // If the allocation is fully committed and every layout/footprint pair
+    // passes Layout::tile's bounds checks, tile directly into title memory.
+    // This avoids a full-size temporary plus a full read and write of the
+    // allocation on every shader-written texture readback.
+    let in_place = back.can_tile_in_place() && crate::texture::committed(at as *const u8, size);
+    let mut scratch = (!in_place).then(|| vec![0u8; size]);
+    let tiled: &mut [u8] = if in_place {
+        crate::watch::writing(at, size);
+        // SAFETY: the mapping read lock and ticket lock are held, and
+        // committed() verified the whole allocation before the mutable view.
+        unsafe { std::slice::from_raw_parts_mut(at as *mut u8, size) }
+    } else {
+        let Some(tiled) = scratch.as_mut() else {
+            return;
+        };
+        // Keep title bytes the subresources do not cover.
+        if !crate::host::read_into(at as *const u8, tiled) {
+            return;
+        }
+        tiled
+    };
     let mut data = std::ptr::null_mut();
     // SAFETY: our read-back buffer, written by the list that has run.
     unsafe {
@@ -241,7 +316,9 @@ pub(crate) fn land(back: &Back) {
     }
     // SAFETY: mapped above.
     unsafe { back.buffer.Unmap(0, None) };
-    crate::host::copy_mapped(at as *mut u8, tiled.as_ptr(), size, true);
+    if !in_place {
+        crate::host::copy_mapped(at as *mut u8, tiled.as_ptr(), size, true);
+    }
     let copied = COPIED.fetch_add(1, Ordering::Relaxed) + 1;
     if copied == 1 || copied.is_multiple_of(128) {
         tracing::info!(copied, bytes = size, "texture readback landed");
