@@ -1923,6 +1923,9 @@ impl Staging {
             if selected.is_some_and(|indices| !indices.contains(&i)) {
                 continue;
             }
+            // A newer CPU-staged version of this subresource must be
+            // copied to VRAM by a subsequent command list.
+            self.dirty_versions[i].fetch_add(1, Relaxed);
             let (mip, slice) = self.part(i);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
