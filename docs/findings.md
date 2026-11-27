@@ -126,6 +126,13 @@ hardware.
   First uploads, bakes and on-demand residency transitions still copy every
   subresource. Host callbacks that depend on the refreshed staging are ordered
   after that flush.
+- Shader-written texture readback now preflights every mip/slice footprint.
+  When the complete title allocation is committed and the tile bounds checks
+  are satisfied, readback data is tiled directly into title memory under the
+  mapping and ticket locks. It skips the full-allocation scratch vector, the
+  initial full read, and the final full write. Partially mapped or uncertain
+  allocations keep the original scratch/read/copy-back path. Diagnostics count
+  direct versus scratch-backed readbacks.
 - Large per-thread texture read scratch is no longer retained without limit:
   the default retained buffer is 16 MiB on hosts with at most 32 GiB RAM and
   64 MiB on larger hosts. `VICTORY_TEXTURE_READ_CACHE_MB` changes the limit;
