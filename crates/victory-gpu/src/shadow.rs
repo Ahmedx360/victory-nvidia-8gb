@@ -1962,6 +1962,8 @@ fn merge_back_scalar(host: &mut [u8], old: &[u8], title: &mut [u8], mask: &mut [
     differs
 }
 
+/// # Safety
+/// The caller must verify AVX2 support and provide four equally sized slices.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn merge_back_avx2(
