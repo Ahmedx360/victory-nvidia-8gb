@@ -920,10 +920,7 @@ fn pending_upload_versions(
         .collect()
 }
 
-fn mark_upload_versions(
-    uploaded: &[std::sync::atomic::AtomicU64],
-    versions: &[(usize, u64)],
-) {
+fn mark_upload_versions(uploaded: &[std::sync::atomic::AtomicU64], versions: &[(usize, u64)]) {
     use std::sync::atomic::Ordering::Relaxed;
     for &(index, version) in versions {
         uploaded[index].fetch_max(version, Relaxed);
@@ -974,7 +971,11 @@ fn dirty_part_ranges(start: usize, size: usize, pages: &[(usize, u16)]) -> Vec<R
         while parts != 0 {
             let first = parts.trailing_zeros() as usize;
             let past = first + (!(parts >> first)).trailing_zeros() as usize;
-            parts = if past >= 16 { 0 } else { parts & (u16::MAX << past) };
+            parts = if past >= 16 {
+                0
+            } else {
+                parts & (u16::MAX << past)
+            };
             let from = page_start
                 .saturating_add(first * crate::watch::KERNEL_PAGE)
                 .max(start);
@@ -1110,7 +1111,11 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         || staging.on_demand
         || !staging.uploaded.load(Relaxed)
         || (pending_versions.is_empty() && staging.dirty.load(Relaxed));
-    if !baking && staging.uploaded.load(Relaxed) && pending_versions.is_empty() && !staging.dirty.load(Relaxed) {
+    if !baking
+        && staging.uploaded.load(Relaxed)
+        && pending_versions.is_empty()
+        && !staging.dirty.load(Relaxed)
+    {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexSkipped, 1);
         list.defer_texture(staging);
@@ -1148,7 +1153,9 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         list.defer_host(move || {
             staging.mark_uploaded(&upload_versions);
             staging.uploaded.store(true, Relaxed);
-            staging.dirty.store(!staging.pending_uploads().is_empty(), Relaxed);
+            staging
+                .dirty
+                .store(!staging.pending_uploads().is_empty(), Relaxed);
         });
     }
     // A host copy that took the place of one with fewer levels: the slots
@@ -1164,7 +1171,11 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
     // memory if they have none. The list copies every level, so each one
     // given here is written whole by it (the rest are copies into no
     // memory, which the card drops).
-    let on_demand = if staging.on_demand { crate::resource::host_tiled(resource) } else { None };
+    let on_demand = if staging.on_demand {
+        crate::resource::host_tiled(resource)
+    } else {
+        None
+    };
     let Some(on_demand) = on_demand else {
         // Once per submission however many of its lists sample the texture.
         list.defer_texture(staging);
@@ -1175,7 +1186,14 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
     list.defer_texture(staging.clone());
     list.defer_host(move || {
         let waiting = on_demand.uploaded(staging.detiled.load(Relaxed), staging.memory as u64);
-        staging.waiting.store(if waiting { crate::host::moment().max(1) } else { 0 }, Relaxed);
+        staging.waiting.store(
+            if waiting {
+                crate::host::moment().max(1)
+            } else {
+                0
+            },
+            Relaxed,
+        );
         // A texture picked by index has no staging buffer after this
         // upload: its slots are made due again by the texture pass.
         if waiting {
@@ -1540,9 +1558,7 @@ impl Staging {
         self.dirty_versions
             .iter()
             .enumerate()
-            .map(|(index, version)| {
-                (index, version.load(std::sync::atomic::Ordering::Relaxed))
-            })
+            .map(|(index, version)| (index, version.load(std::sync::atomic::Ordering::Relaxed)))
             .collect()
     }
 
@@ -1680,7 +1696,10 @@ impl Staging {
     fn refresh_now(&self) -> usize {
         let whole = std::time::Instant::now();
         let read = self.refresh_timed();
-        REFRESH_WAITS[3].fetch_add(whole.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        REFRESH_WAITS[3].fetch_add(
+            whole.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         read
     }
 
@@ -1694,7 +1713,10 @@ impl Staging {
         if alone && !exact && last.hash.is_some() {
             return 0;
         }
-        if !alone && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false)) {
+        if !alone
+            && let Some((now, written)) =
+                waited(1, || crate::watch::writes(start, start + size, false))
+        {
             let before = last.asked;
             if !exact && before != 0 && written.iter().all(|&(_, asking)| asking <= before) {
                 return 0;
@@ -1944,7 +1966,11 @@ impl Staging {
         } else {
             u32::MAX
         };
-        let selected = if self.on_demand && old_held != held { None } else { selected };
+        let selected = if self.on_demand && old_held != held {
+            None
+        } else {
+            selected
+        };
 
         #[cfg(feature = "diagnostics")]
         if selected.is_none() && tiled.iter().all(|&b| b == 0) {
@@ -2522,10 +2548,7 @@ mod dirty_range_tests {
     fn dirty_subpages_are_clipped_to_texture_boundaries() {
         let start = crate::watch::PAGE + crate::watch::KERNEL_PAGE;
         let size = crate::watch::PAGE + 3 * crate::watch::KERNEL_PAGE;
-        let pages = [
-            (1, (1 << 1) | (1 << 3)),
-            (2, (1 << 0) | (1 << 2)),
-        ];
+        let pages = [(1, (1 << 1) | (1 << 3)), (2, (1 << 0) | (1 << 2))];
         assert_eq!(
             dirty_part_ranges(start, size, &pages),
             vec![
