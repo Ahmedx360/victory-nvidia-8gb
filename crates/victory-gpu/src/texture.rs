@@ -18,6 +18,7 @@
 pub(crate) mod ahead;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -49,6 +50,8 @@ pub(crate) struct Staging {
     rows: Vec<u32>,
     /// Title mip/array-slice represented by each footprint.
     parts: Vec<(u32, u32)>,
+    /// Tiled-memory byte ranges read when detiling each subresource.
+    extents: Vec<Vec<Range<usize>>>,
     /// D3D12 indices corresponding to the footprints (not necessarily
     /// contiguous when a mip prefix is omitted from an array).
     subresources: Vec<u32>,
