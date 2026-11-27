@@ -110,6 +110,13 @@ references merge their selected indices before the flush, and dependent host
 callbacks run after the refresh. First uploads, one-shot bakes and on-demand
 residency transitions still copy all subresources.
 
+Shader-written texture readback also has an in-place landing path. It
+preflights all tiled-layout/footprint bounds and uses it only when the whole
+title allocation is committed; then the GPU readback is tiled directly into
+title memory while its mapping and readback-ticket locks are held. Partial or
+uncertain allocations keep the old full scratch/read/copy-back path. The
+diagnostics summary reports direct and scratch-backed readback counts.
+
 Per-thread texture scratch is retained up to 16 MiB on hosts with at most
 32 GiB RAM, or 64 MiB on larger hosts. Set
 `VICTORY_TEXTURE_READ_CACHE_MB` to tune the retained limit (0 retains none).
