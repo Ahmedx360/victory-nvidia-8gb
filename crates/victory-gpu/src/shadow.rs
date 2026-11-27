@@ -3369,8 +3369,19 @@ impl Shadow {
                 self.changed(at, at + n);
             }
 
+            debug_assert!(
+                differing
+                    .windows(2)
+                    .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0),
+                "copy-back pieces must be disjoint and ordered"
+            );
             let piece_count = differing.len();
             if piece_count >= 8 {
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(
+                    crate::copystat::C::BackParallelPieces,
+                    piece_count as u64,
+                );
                 // The snapshot lock stays held until every worker returns.
                 // These addresses are used only inside wide_each, which joins
                 // all work before this method releases the guard.
