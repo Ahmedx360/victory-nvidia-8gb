@@ -25,7 +25,6 @@ param(
     [switch]$NoTelemetry
 )
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
 $launchScript = Join-Path $PSScriptRoot 'play-nvidia-8gb.ps1'
 if (-not (Test-Path -LiteralPath $launchScript -PathType Leaf)) {
     throw "NVIDIA profile launcher missing at $launchScript."
@@ -64,13 +63,28 @@ if ($Water) { $launchArgs.Water = $true }
 if ($NoOverlay) { $launchArgs.NoOverlay = $true }
 if ($NoTelemetry) { $launchArgs.NoTelemetry = $true }
 
+$nonBlockingTextureRefresh = if ($WaitForTextureMemory) {
+    $false
+} elseif (Test-Path Env:VICTORY_TEXTURE_NO_WAIT) {
+    $env:VICTORY_TEXTURE_NO_WAIT -eq '1'
+} else {
+    $true
+}
+$overlayEnabled = if ($NoOverlay) {
+    $false
+} elseif (Test-Path Env:VICTORY_OVERLAY) {
+    $env:VICTORY_OVERLAY -ne '0'
+} else {
+    $true
+}
+
 Write-Host 'VIctory NVIDIA 8 GB profile'
 Write-Host "  Console: $Console"
 Write-Host "  Resolution cap: $Resolution"
 Write-Host "  Texture max dimension: $TextureMaxDim (0 disables the cap)"
 Write-Host "  Reduced idle-memory retention: $(-not $NoLowMemory)"
-Write-Host "  Non-blocking texture refresh: $(-not $WaitForTextureMemory)"
-Write-Host "  Overlay: $(-not $NoOverlay)"
+Write-Host "  Non-blocking texture refresh: $nonBlockingTextureRefresh"
+Write-Host "  Overlay: $overlayEnabled"
 Write-Host '  Use the same save, scene and camera position for A/B comparisons.'
 
 $exitCode = $null
