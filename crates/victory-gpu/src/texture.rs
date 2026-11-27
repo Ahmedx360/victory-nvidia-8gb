@@ -2310,6 +2310,28 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
     tracing::debug!(?desc, total, "texture contents uploaded from title memory");
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
+    let extents: Vec<Vec<Range<usize>>> = parts
+        .iter()
+        .map(|part| {
+            let ranges = layout
+                .extents(part.0, part.1)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|range| {
+                    let start = usize::try_from(range.start).ok()?.min(read);
+                    let end = usize::try_from(range.end).ok()?.min(read);
+                    (start < end).then_some(start..end)
+                })
+                .collect();
+            let ranges = coalesce_ranges(ranges);
+            if ranges.is_empty() {
+                // Unknown layouts must stay on the safe full-refresh path.
+                vec![0..read]
+            } else {
+                ranges
+            }
+        })
+        .collect();
     let s = Arc::new(Staging {
         buffer,
         base,
@@ -2320,6 +2342,7 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         footprints,
         rows,
         parts: parts.iter().map(|part| (part.0, part.1)).collect(),
+        extents,
         subresources,
         layout,
         first,
