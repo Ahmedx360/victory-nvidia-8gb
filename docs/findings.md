@@ -95,6 +95,46 @@ in that order of size:
 5. Memory, 40-46 GB private: lists' allocators 9 GB, windows 7, uploads 4
    (`VICTORY_MEMORY_MAP=1` lists it).
 
+## NVIDIA memory and texture-upload work (2026-11-27; not yet benchmarked)
+
+The current NVIDIA path now narrows both CPU-side texture refresh and the
+subsequent GPU copies. This is a correctness-first change with conservative
+fallbacks; no FPS or bandwidth gain is claimed until measured on NVIDIA
+hardware.
+
+- Write-watched memory is still tracked in 64 KiB pages, but the journal's
+  existing 4 KiB subpage masks are used to identify the portions written since
+  a texture's last refresh.
+- Each staged texture subresource has a conservative byte extent in the
+  console's tiled layout. A dirty range refreshes only overlapping mip/slice
+  extents; packed mip tails naturally refresh together when their extents
+  overlap. Unknown layouts, on-demand residency, fragmented ranges, and updates
+  covering at least 75% of the texture retain the full-refresh path.
+- When the mapping lock is immediately available and all texture pages are
+  committed, the refresh reads in place. If the title is remapping or pages
+  are missing, it falls back to the guarded kernel copy and keeps missing bytes
+  zero-filled.
+- D3D12 texture copies are now recorded only for subresources whose CPU-staged
+  version has not yet been copied to the GPU. Each list acknowledges the exact
+  versions captured when it recorded commands; a newer refresh remains pending
+  instead of being cleared by an older callback. First uploads, bakes and
+  on-demand residency transitions still copy every subresource.
+- Large per-thread texture read scratch is no longer retained without limit:
+  the default retained buffer is 16 MiB on hosts with at most 32 GiB RAM and
+  64 MiB on larger hosts. `VICTORY_TEXTURE_READ_CACHE_MB` changes the limit;
+  larger individual reads use temporary scratch.
+- On hosts with 16 GiB RAM or less, speculative texture prefetch enters memory
+  pressure at 5 GiB free physical memory and uses tighter 16/4 MiB per-frame
+  admission caps in pressure/critical states.
+
+Compare the same title, save, scene, resolution and driver before and after.
+Record memory-census private commit and working set, texture staging bytes,
+dedicated/local VRAM and budget, bytes refreshed, number of texture copy
+subresources per frame, median frame time and 95th-percentile frame time. Also
+inspect mip/texture streaming and visual correctness. The direct-read path
+and selective copy path need real NVIDIA validation before their thresholds
+are tuned further.
+
 ## The other repositories, compared
 
 Read up to 2026-11-25: Marvisak/VIctory, fxceless/victory-fork, DexNom/VIctory,
