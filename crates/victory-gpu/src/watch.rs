@@ -35,7 +35,7 @@ use std::sync::{Condvar, Mutex, RwLock};
 /// big buffers cost more than the copies they saved.
 pub(crate) const PAGE: usize = 64 << 10;
 /// The kernel's page, the unit of its answers.
-const KERNEL_PAGE: usize = 4096;
+pub(crate) const KERNEL_PAGE: usize = 4096;
 
 /// The parts of a page.
 const PARTS: usize = PAGE / KERNEL_PAGE;
