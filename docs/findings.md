@@ -103,13 +103,16 @@ fallbacks; no FPS or bandwidth gain is claimed until measured on NVIDIA
 hardware.
 
 - Write-watched memory is still tracked in 64 KiB pages, but the journal's
-  existing 4 KiB subpage masks are used to identify the portions written since
-  a texture's last refresh.
+  existing 4 KiB subpage masks identify the portions written since a texture's
+  last refresh. The same masks now accelerate physical-page views when their
+  write guards actually saw the write; the periodic whole-texture hash remains
+  as a fallback for writes through aliases that a guard cannot see.
 - Each staged texture subresource has a conservative byte extent in the
   console's tiled layout. A dirty range refreshes only overlapping mip/slice
   extents; packed mip tails naturally refresh together when their extents
-  overlap. Unknown layouts, on-demand residency, fragmented ranges, and updates
-  covering at least 75% of the texture retain the full-refresh path.
+  overlap. Unknown layouts, on-demand residency, partial mappings, fragmented
+  ranges, and updates covering at least 75% of the texture retain the
+  full-refresh path.
 - When the mapping lock is immediately available and all texture pages are
   committed, the refresh reads in place. If the title is remapping or pages
   are missing, it falls back to the guarded kernel copy and keeps missing bytes
