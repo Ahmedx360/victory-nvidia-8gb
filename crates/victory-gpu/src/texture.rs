@@ -2387,7 +2387,8 @@ mod dirty_range_tests {
                 0..crate::watch::KERNEL_PAGE,
                 2 * crate::watch::KERNEL_PAGE..3 * crate::watch::KERNEL_PAGE,
                 crate::watch::PAGE - crate::watch::KERNEL_PAGE..crate::watch::PAGE,
-                crate::watch::PAGE + crate::watch::KERNEL_PAGE..size,
+                crate::watch::PAGE + crate::watch::KERNEL_PAGE
+                    ..crate::watch::PAGE + 2 * crate::watch::KERNEL_PAGE,
             ]
         );
     }
