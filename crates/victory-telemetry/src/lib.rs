@@ -687,8 +687,6 @@ fn record(options: Options, stop: Receiver<()>) {
         }
         if !ingest_ok("/vi/v1/ingest", &bundle.to_string(), Some(tok), "ingest") {
             upload_notes.push("ingest failed after retries".into());
-        } else {
-            ingested = true;
         }
         flush_pending_screenshots(
             &id,
