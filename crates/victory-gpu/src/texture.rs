@@ -1958,9 +1958,6 @@ impl Staging {
             if selected.is_some_and(|indices| !indices.contains(&i)) {
                 continue;
             }
-            // A newer CPU-staged version of this subresource must be
-            // copied to VRAM by a subsequent command list.
-            self.dirty_versions[i].fetch_add(1, Relaxed);
             let (mip, slice) = self.part(i);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
@@ -1975,15 +1972,17 @@ impl Staging {
             };
             if mip < 32 && held & (1 << mip) == 0 {
                 linear.fill(0);
-                continue;
-            }
-            if let Err(e) =
+            } else if let Err(e) =
                 self.layout
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
                 tracing::warn!(?e, mip, slice, "texture not detiled");
                 return;
             }
+            // A newer CPU-staged version of this subresource must be copied
+            // to VRAM by a subsequent command list. Increment only after it
+            // has been detiled (or deliberately zeroed for an unheld mip).
+            self.dirty_versions[i].fetch_add(1, Relaxed);
         }
     }
 }
