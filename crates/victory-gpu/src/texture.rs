@@ -920,10 +920,15 @@ fn pending_upload_versions(
         .collect()
 }
 
-fn mark_upload_versions(uploaded: &[std::sync::atomic::AtomicU64], versions: &[(usize, u64)]) {
+fn mark_upload_versions(
+    dirty: &[std::sync::atomic::AtomicU64],
+    uploaded: &[std::sync::atomic::AtomicU64],
+    indices: &[usize],
+) {
     use std::sync::atomic::Ordering::Relaxed;
-    for &(index, version) in versions {
-        uploaded[index].fetch_max(version, Relaxed);
+    for &index in indices {
+        let current = dirty[index].load(Relaxed);
+        uploaded[index].fetch_max(current, Relaxed);
     }
 }
 
@@ -1552,19 +1557,26 @@ impl Staging {
         pending_upload_versions(&self.dirty_versions, &self.uploaded_versions)
     }
 
-    /// Snapshot every subresource, used for first uploads, one-shot bakes and
-    /// on-demand residency changes which can invalidate the entire texture.
-    fn all_upload_versions(&self) -> Vec<(usize, u64)> {
-        self.dirty_versions
-            .iter()
-            .enumerate()
-            .map(|(index, version)| (index, version.load(std::sync::atomic::Ordering::Relaxed)))
-            .collect()
+    /// All subresources, used for first uploads, one-shot bakes and
+    /// on-demand residency changes which can invalidate the whole texture.
+    fn all_upload_indices(&self) -> Vec<usize> {
+        (0..self.dirty_versions.len()).collect()
     }
 
-    /// Mark only the exact versions a recorded copy command will transfer.
-    fn mark_uploaded(&self, versions: &[(usize, u64)]) {
-        mark_upload_versions(&self.uploaded_versions, versions);
+    /// Acknowledge copied subresources after the submission refresh has
+    /// finished updating their staging bytes. Subresources not copied by this
+    /// submission remain pending.
+    pub(crate) fn acknowledge_uploads(&self, indices: &[usize]) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if indices.is_empty() {
+            return;
+        }
+        for &index in indices {
+            let current = self.dirty_versions[index].load(Relaxed);
+            self.uploaded_versions[index].fetch_max(current, Relaxed);
+        }
+        self.uploaded.store(true, Relaxed);
+        self.dirty.store(!self.pending_uploads().is_empty(), Relaxed);
     }
 
     /// The host copy holds what the staging buffer was filled from.
@@ -2514,24 +2526,34 @@ mod upload_version_tests {
     use std::sync::atomic::AtomicU64;
 
     #[test]
-    fn old_upload_callback_does_not_clear_a_newer_staging_version() {
+    fn acknowledge_after_refresh_marks_the_bytes_the_copy_will_read() {
         let dirty = [AtomicU64::new(2), AtomicU64::new(4), AtomicU64::new(1)];
         let uploaded = [AtomicU64::new(1), AtomicU64::new(2), AtomicU64::new(1)];
-        let snapshot = pending_upload_versions(&dirty, &uploaded);
-        assert_eq!(snapshot, vec![(0, 2), (1, 4)]);
+        let pending = pending_upload_versions(&dirty, &uploaded);
+        let selected: Vec<usize> = pending.iter().map(|&(index, _)| index).collect();
 
-        // Another refresh writes subresource 1 after the list records its
-        // copy. The older callback may acknowledge only version 4, not 5.
+        // The deferred texture refresh runs after the command list was
+        // recorded, but before the GPU executes it.
         dirty[1].store(5, std::sync::atomic::Ordering::Relaxed);
-        mark_upload_versions(&uploaded, &snapshot);
-        assert_eq!(pending_upload_versions(&dirty, &uploaded), vec![(1, 5)]);
+        mark_upload_versions(&dirty, &uploaded, &selected);
+        assert!(pending_upload_versions(&dirty, &uploaded).is_empty());
     }
 
     #[test]
-    fn duplicate_or_out_of_order_upload_callbacks_are_monotonic() {
+    fn unselected_subresources_remain_pending() {
+        let dirty = [AtomicU64::new(2), AtomicU64::new(4), AtomicU64::new(1)];
+        let uploaded = [AtomicU64::new(1), AtomicU64::new(2), AtomicU64::new(1)];
+        mark_upload_versions(&dirty, &uploaded, &[0]);
+        assert_eq!(pending_upload_versions(&dirty, &uploaded), vec![(1, 4)]);
+    }
+
+    #[test]
+    fn acknowledgements_are_monotonic() {
+        let dirty = [AtomicU64::new(7), AtomicU64::new(4)];
         let uploaded = [AtomicU64::new(0), AtomicU64::new(0)];
-        mark_upload_versions(&uploaded, &[(0, 7), (1, 3)]);
-        mark_upload_versions(&uploaded, &[(0, 5), (1, 4)]);
+        mark_upload_versions(&dirty, &uploaded, &[0, 1]);
+        dirty[0].store(5, std::sync::atomic::Ordering::Relaxed);
+        mark_upload_versions(&dirty, &uploaded, &[0]);
         assert_eq!(
             uploaded.map(|version| version.load(std::sync::atomic::Ordering::Relaxed)),
             [7, 4]
