@@ -4355,7 +4355,62 @@ impl Shadow {
         to - from
     }
 
-    /// Copies title memory `[from, to)`, cut to the buffer, into the copy.
+    /// Copy title memory into a host shadow. Fully committed chunks are read
+    /// in place only while the runtime's mapping lock can be taken immediately.
+    /// The bounded chunk size keeps streaming/remapping pauses short; a partial
+    /// range or busy mapping always uses the guarded kernel-copy implementation.
+    fn copy_title_memory(destination: *mut u8, source: *const u8, len: usize) -> usize {
+        const DIRECT_CHUNK: usize = 4 << 20;
+        const MIN_DIRECT: usize = 64 << 10;
+        let mut direct = 0usize;
+        let mut offset = 0usize;
+        while offset < len {
+            let count = (len - offset).min(DIRECT_CHUNK);
+            // Avoid the mapping/working-set probes for tiny ranges.
+            let copied_direct = if count >= MIN_DIRECT {
+                if let Some(_mapped) = crate::watch::title_memory_reading_now()
+                    && crate::texture::committed(source.wrapping_add(offset), count)
+                {
+                    // SAFETY: the mapping read lock is held and committed()
+                    // confirmed the entire source chunk is readable.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            source.add(offset),
+                            destination.add(offset),
+                            count,
+                        );
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if copied_direct {
+                direct += count;
+            } else {
+                crate::host::copy_mapped(
+                    // SAFETY: the destination slice covers [offset, offset + count).
+                    unsafe { destination.add(offset) },
+                    // SAFETY: source is the caller's [source, source + len).
+                    unsafe { source.add(offset) },
+                    count,
+                    false,
+                );
+            }
+            offset += count;
+        }
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::copystat::{C, add};
+            add(C::ShadowDirectBytes, direct as u64);
+            add(C::ShadowKernelBytes, (len - direct) as u64);
+        }
+        direct
+    }
+
+    /// Copies title memory [from, to), using the direct helper when safe.
     fn copy(&self, from: usize, to: usize) -> usize {
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let (from, to) = (from.max(start), to.min(end));
@@ -4369,7 +4424,7 @@ impl Shadow {
                 crate::host::upcheck::note(self.id, a, &was, &self.card_held(a, b - a));
             });
         } else {
-            crate::host::copy_mapped(at, from as *const u8, to - from, false);
+            copy_title_memory(at, from as *const u8, to - from);
         }
         // After the bytes are in: a snapshot taken meanwhile is not current.
         self.changed(from - start, to - start);
