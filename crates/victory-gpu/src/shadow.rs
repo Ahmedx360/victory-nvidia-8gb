@@ -1928,6 +1928,14 @@ mod wide_tests {
 /// whose bytes are the GPU's and differ from the title's as read: only
 /// those are to be written, so a title write that lands between the read
 /// and the write elsewhere in the stretch stays (upstream VIctory #2009).
+thread_local! {
+    /// Two reusable buffers for shader-write landing. Each worker holds at
+    /// most one 64 KiB title stretch and its original bytes, not one
+    /// allocation for every changed piece in a frame.
+    static BACK_SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 /// Three-way merge of GPU bytes, the pre-submit snapshot and current
 /// title bytes. The GPU wins only where the GPU changed a byte and the title
 /// left it untouched. AVX2 handles 32 bytes per iteration on supported CPUs.
@@ -3354,27 +3362,90 @@ impl Shadow {
                 add(C::BackDiffer, differing.len() as u64);
                 std::time::Instant::now()
             };
-            // Where the copy changes (the GPU wrote, and below the title's
-            // bytes come in), a kept snapshot is no longer current.
+            // Invalidate kept snapshot pieces before dispatching work. The
+            // changed spans are disjoint 64 KiB title-memory blocks, so each
+            // worker can read/merge/write its own block without racing another.
             for &(at, n) in &differing {
                 self.changed(at, at + n);
             }
-            // Sized to each stretch read (`back_piece`): a zeroed 64 KiB per
-            // range, most of whose ranges differ nowhere, was most of the
-            // work for small ranges.
-            let (mut title, mut was) = (Vec::new(), Vec::new());
-            for (at, n) in differing {
-                // SAFETY: inside the mapping; only the submitting thread
-                // writes it.
-                let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
-                let old = &before[at - from..at - from + n];
-                let read = |first: usize, title: &mut [u8]| crate::host::read_into((start + at + first) as *const u8, title);
-                let Some((first, n)) = back_piece(host, old, &mut title, &mut was, read) else {
-                    continue;
-                };
-                // The merge saved the original title bytes in was. The guarded
-                // writer performs the exact changed-dword scan before storing.
-                written += put_changed(start + at + first, &was[..n], &title[..n]);
+
+            let piece_count = differing.len();
+            if piece_count >= 8 {
+                // The snapshot lock stays held until every worker returns.
+                // These addresses are used only inside wide_each, which joins
+                // all work before this method releases the guard.
+                let data = self.data as usize;
+                let snapshot = before.as_ptr() as usize;
+                let shadow_start = start;
+                let range_start = from;
+                let pieces = differing;
+                let written_parallel =
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let total = written_parallel.clone();
+                crate::shadow::wide_each(piece_count, move |i| {
+                    let (at, len) = pieces[i];
+                    // SAFETY: each returned piece is within this shadow's
+                    // mapped data and does not overlap any other piece.
+                    let host = unsafe {
+                        std::slice::from_raw_parts_mut((data + at) as *mut u8, len)
+                    };
+                    // SAFETY: the snapshot MutexGuard remains held until
+                    // wide_each joins, and at is within the declared range.
+                    let old = unsafe {
+                        std::slice::from_raw_parts(
+                            (snapshot + at - range_start) as *const u8,
+                            len,
+                        )
+                    };
+                    let bytes_written = BACK_SCRATCH.with(|scratch| {
+                        let mut scratch = scratch.borrow_mut();
+                        let (title, was) = &mut *scratch;
+                        let read = |first: usize, title: &mut [u8]| {
+                            crate::host::read_into(
+                                (shadow_start + at + first) as *const u8,
+                                title,
+                            )
+                        };
+                        let Some((first, n)) = back_piece(host, old, title, was, read) else {
+                            return 0;
+                        };
+                        // The saved original title bytes and merged result
+                        // are disjoint from every other worker's spans.
+                        put_changed(
+                            shadow_start + at + first,
+                            &was[..n],
+                            &title[..n],
+                        )
+                    });
+                    total.fetch_add(bytes_written, Ordering::Relaxed);
+                });
+                written += written_parallel.load(Ordering::Relaxed);
+            } else {
+                BACK_SCRATCH.with(|scratch| {
+                    let mut scratch = scratch.borrow_mut();
+                    let (title, was) = &mut *scratch;
+                    for (at, len) in differing {
+                        // SAFETY: inside the mapping; this path is serial.
+                        let host = unsafe {
+                            std::slice::from_raw_parts_mut(self.data.add(at), len)
+                        };
+                        let old = &before[at - from..at - from + len];
+                        let read = |first: usize, title: &mut [u8]| {
+                            crate::host::read_into(
+                                (start + at + first) as *const u8,
+                                title,
+                            )
+                        };
+                        let Some((first, n)) = back_piece(host, old, title, was, read) else {
+                            continue;
+                        };
+                        written += put_changed(
+                            start + at + first,
+                            &was[..n],
+                            &title[..n],
+                        );
+                    }
+                });
             }
             // Our write shows as a title write at the copy's next refresh,
             // which copies those pages once more (some dozens of MB a
