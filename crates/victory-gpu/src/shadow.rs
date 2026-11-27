@@ -3369,14 +3369,12 @@ impl Shadow {
                 self.changed(at, at + n);
             }
 
-            debug_assert!(
-                differing
-                    .windows(2)
-                    .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0),
-                "copy-back pieces must be disjoint and ordered"
-            );
+            let disjoint = differing
+                .windows(2)
+                .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0);
+            debug_assert!(disjoint, "copy-back pieces must be disjoint and ordered");
             let piece_count = differing.len();
-            if piece_count >= 8 {
+            if piece_count >= 8 && disjoint {
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(
                     crate::copystat::C::BackParallelPieces,
