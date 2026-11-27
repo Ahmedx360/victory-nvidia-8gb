@@ -7655,6 +7655,13 @@ impl HostList {
                     let started = std::time::Instant::now();
                     if matches!(step, Step::Run(_)) {
                         batch.title_written();
+                    } else if !batch.due.is_empty() {
+                        // Host callbacks following a texture step can depend
+                        // on the just-refreshed staging image (held-content
+                        // bookkeeping and on-demand residency decisions).
+                        // Flush only when such callbacks are reached, not at
+                        // every texture reference.
+                        batch.refresh_textures();
                     }
                     let _step = crate::timeline::span("a step of ours");
                     work();
