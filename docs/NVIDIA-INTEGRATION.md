@@ -92,11 +92,13 @@ from movies to gameplay to check the read-back and two-plane fixes.
 ## Texture refresh and VRAM upload traffic
 
 The write-watched texture path uses the journal's 4 KiB subpage bits inside
-its 64 KiB tracked pages. It computes conservative tiled-memory extents for
-each uploaded mip/slice and refreshes only subresources overlapping the dirty
-bytes. Packed mip tails can overlap and are refreshed together. On-demand
-residency changes, unknown extents, fragmented changes and near-whole-texture
-updates keep the full refresh fallback.
+its 64 KiB tracked pages. The same masks now serve the physical-page path when
+its write guard actually observed the write; the periodic whole-texture hash
+remains to find alias writes a guard cannot see. It computes conservative
+tiled-memory extents for each mip/slice and refreshes only overlapping
+subresources. Packed mip tails can overlap and are refreshed together.
+On-demand residency changes, unknown extents, partial mappings, fragmented
+changes and near-whole-texture updates keep the full refresh fallback.
 
 For fully committed title memory, refresh now tries the mapping read lock
 without waiting and detiles in place. If the lock is busy or any page is
