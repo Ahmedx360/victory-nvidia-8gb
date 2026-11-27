@@ -1,9 +1,14 @@
-name: Build victory (Windows)
+name: Build and verify VIctory (Windows)
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -12,6 +17,36 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Enforce repository asset policy
+        run: cargo xtask policy
+
+      - name: Parse PowerShell launchers
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path .\scripts -Filter *.ps1 -File
+          foreach ($file in $files) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName,
+              [ref]$tokens,
+              [ref]$parseErrors
+            )
+            if ($parseErrors.Count -gt 0) {
+              $messages = ($parseErrors | ForEach-Object { $_.Message }) -join '; '
+              throw "PowerShell parse errors in $($file.Name): $messages"
+            }
+          }
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked
 
       - name: Build release
         run: cargo build --release --locked -p victory
