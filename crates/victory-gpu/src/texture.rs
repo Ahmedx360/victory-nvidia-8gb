@@ -1616,6 +1616,40 @@ impl Staging {
         }
     }
 
+    /// Detile subresources named by dirty bytes from already-locked title
+    /// memory. This is also used for physical-page views whose write guards
+    /// saw the write; the periodic whole-texture hash remains for alias writes
+    /// that the guard cannot observe.
+    fn detile_changed_in_place(&self, tiled: &[u8], changed: &[Range<usize>]) -> usize {
+        if self.on_demand {
+            self.detile(tiled);
+            return self.read;
+        }
+        let selected: Vec<usize> = self
+            .extents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, extents)| ranges_overlap(extents, changed).then_some(index))
+            .collect();
+        if selected.is_empty() {
+            return 0;
+        }
+        let ranges = coalesce_ranges(
+            selected
+                .iter()
+                .flat_map(|&index| self.extents[index].iter().cloned())
+                .collect(),
+        );
+        let bytes: usize = ranges.iter().map(|range| range.end - range.start).sum();
+        if ranges.len() > 32 || bytes >= self.read.saturating_mul(3) / 4 {
+            self.detile(tiled);
+            self.read
+        } else {
+            self.detile_selected(tiled, Some(&selected));
+            bytes
+        }
+    }
+
     /// Refresh the subresources touched by dirty bytes. On-demand tiled
     /// textures keep the full path because residency changes can alter which
     /// mip levels belong to the allocation.
@@ -1750,13 +1784,21 @@ impl Staging {
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         // The guard saw no write: a change the hash finds came another way.
         let mut blind = false;
+        let mut guarded_changes: Option<Vec<Range<usize>>> = None;
         if !alone
             && *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
             && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
             const HASH_EVERY: u64 = 8;
-            let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
+            let before = last.asked;
+            let unwritten = before != 0 && written.iter().all(|&(_, w)| w <= before);
             last.asked = now;
+            if !unwritten {
+                let changed = dirty_page_ranges(start, size, before, &written);
+                if !changed.is_empty() {
+                    guarded_changes = Some(changed);
+                }
+            }
             let frame = crate::frame::current();
             let turn = frame
                 .wrapping_add((start >> 16) as u64)
@@ -1833,6 +1875,24 @@ impl Staging {
                 found_blind(last);
             }
             return size;
+        }
+        if !through_copy()
+            && let Some(changed) = guarded_changes.as_deref()
+            && committed(self.memory, size)
+        {
+            // SAFETY: the mapping read lock is held above and the complete
+            // texture is committed for the duration of the selective detile.
+            let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
+            let read = self.detile_changed_in_place(tiled, changed);
+            if read != 0 {
+                // The page-wise digest cache is not updated on this path.
+                // Disable "unchanged texture" reuse rather than compare against
+                // a stale whole-allocation fingerprint.
+                last.hash = None;
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexChanged, read as u64);
+            }
+            return read;
         }
         if through_copy() {
             return with_title(self.memory, size, |tiled| {
