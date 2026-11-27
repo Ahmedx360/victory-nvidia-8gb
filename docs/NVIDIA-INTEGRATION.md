@@ -110,6 +110,11 @@ references merge their selected indices before the flush, and dependent host
 callbacks run after the refresh. First uploads, one-shot bakes and on-demand
 residency transitions still copy all subresources.
 
+Shader-written buffer copy-back reuses its previous-title scratch storage
+across pieces and uses a 32-byte AVX2 three-way merge where supported, with
+a scalar fallback for other CPUs and vector tails. The byte-selection rule
+is unchanged so concurrent title writes continue to win over stale GPU data.
+
 Shader-written texture readback also has an in-place landing path. It
 preflights all tiled-layout/footprint bounds and uses it only when the whole
 title allocation is committed; then the GPU readback is tiled directly into
